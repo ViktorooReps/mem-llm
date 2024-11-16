@@ -564,7 +564,7 @@ if __name__ == '__main__':
 
     if not DATASET_PATH.exists():
         print(f'Downloading {DATASET_SOURCE}...')
-        response = requests.get(download_url)
+        response = requests.get(DATASET_SOURCE)
 
         with open(DATASET_PATH, 'wb') as file:
             file.write(response.content)
