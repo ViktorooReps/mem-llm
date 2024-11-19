@@ -1,596 +1,204 @@
-import abc
-import json
-import time
-from abc import abstractmethod
-from dataclasses import dataclass
-from pathlib import Path
-
-import nltk
 import numpy as np
+import pandas as pd
 import torch
-import re
-import requests
 
-from nltk.tokenize import PunktTokenizer
-from torch import nn
-from torch.nn.utils.rnn import pad_sequence
-from torch.nn.attention.flex_attention import create_block_mask, and_masks, flex_attention
-from torch.utils.data import DataLoader
-from torch.nn.functional import scaled_dot_product_attention
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
-import matplotlib.pyplot as plt
 import seaborn as sns
-
-from typing import Iterable, TypeVar
-from itertools import chain
-
+import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 
-nltk.download('punkt')
-nltk.download('punkt_tab')
+from typing import Iterator
 
+from torch.nn.functional import scaled_dot_product_attention
 
-_T = TypeVar('_T')
+torch._dynamo.config.cache_size_limit = 1000
 
 
-DATASET_PATH = Path('tinyshakespeare.txt')
-PRETOKENIZED_DATASET_PATH = Path('data/tinyshakespeare')
-DATASET_SOURCE = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
+def create_mask_mod(context_size: int, stm_window_size: int, mem_freq: int):
+    """
+    Designed for the use on the input that consists of the concatenation of memory states and context states.
+    Does not support padding!
+    """
+    n_mem = (context_size // mem_freq) + (context_size % mem_freq > 0)  # for block_size = 4: 0, 4, 8, 12, ...
+    main_start = n_mem
 
+    mem_end = main_start
 
-flex_attention = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
-sdpa = torch.compile(scaled_dot_product_attention, dynamic=False)
+    def causal_window_mask_with_mem(b, h, q_idx, kv_idx):
+        # differentiator of main from mem parts
+        is_mem_kv = (kv_idx < mem_end)
+        is_mem_q = (q_idx < mem_end)
 
-torch._dynamo.config.cache_size_limit = 5000
+        # only valid for mem part
+        mem_kv_idx = kv_idx * mem_freq
+        mem_q_idx = q_idx * mem_freq
 
+        # the first tokens are mem, so we realign with 0
+        # only valid for main part
+        kv_idx = kv_idx - main_start
+        q_idx = q_idx - main_start
 
-class Configurable(metaclass=abc.ABCMeta):
-    @abstractmethod
-    def to_config(self):
-        pass
+        main2main_causal = (kv_idx <= q_idx)
+        main2main_windowed = (q_idx - kv_idx < stm_window_size)
 
-    @classmethod
-    def from_config(cls: _T, config: dict) -> _T:
-        return cls(**config)
+        # without window when attending to mem
+        main2mem_causal = (mem_kv_idx <= q_idx)
+        mem2mem_causal = (mem_kv_idx <= mem_q_idx)
 
-    def save(self, path: str | Path) -> None:
-        config = self.to_config()
-        with open(path, 'w') as f:
-            json.dump(config, f, indent=2)
+        mem2main_causal = (
+                    kv_idx < mem_q_idx)  # not <=!! we restrict attending to immediate token: 0 does not attend to 0 etc.
+        mem2main_windowed = (
+                    mem_q_idx - kv_idx <= stm_window_size)  # not <!! extend window by 1 since we took 1 token off other side
 
-    @classmethod
-    def load(cls: _T, path: str | Path) -> _T:
-        with open(path, 'r') as f:
-            config = json.load(f)
-
-        return cls.from_config(config)
-
-
-@dataclass
-class ModelOutput:
-    # model predicts next character and whether the current segment has ended
-    logits: torch.Tensor
-    logits_segment: torch.Tensor
-    # per layer
-    keys: list[torch.Tensor]
-    values: list[torch.Tensor]
-
-
-class Generator(nn.Module, metaclass=abc.ABCMeta):
-    @abstractmethod
-    def forward(
-            self,
-            tokens: torch.Tensor,
-            segment_mask: torch.Tensor,
-            specials_mask: torch.Tensor,
-            past_keys: list[torch.Tensor] | None = None,
-            past_values: list[torch.Tensor] | None = None,
-            **kwargs
-    ) -> ModelOutput:
-        pass
-
-
-IS_SPECIAL_REGEX = re.compile(r'[^a-zA-Z0-9]')
-
-
-class Tokenizer(Configurable):
-    def __init__(
-            self,
-            vocab_size: int = 128,
-            device: str = 'cpu',
-            segment: str | None = None,  # "sentence", "word" or "sentence+word"
-    ):
-        self.size = vocab_size
-        self.segment = segment if segment is not None else ''
-
-        self.is_special = torch.tensor([
-            IS_SPECIAL_REGEX.match(f'{chr(o)}') is not None
-            for o in range(vocab_size)
-        ], dtype=torch.bool, device=device)
-
-        self.tokenizer_sent = None
-
-        self.segment_sent = False
-        self.segment_word = False
-
-        self.unk_token = 0
-        self.bot_token = 2
-        self.eot_token = 3
-        self.sep_token = ord(' ')
-        self.pad_token = 127
-
-        for segment_type in self.segment.split('+'):
-            if segment_type == 'sentence':
-                self.tokenizer_sent = PunktTokenizer('english')
-                self.segment_sent = True
-            if segment_type == 'word':
-                self.segment_word = True
-
-    @property
-    def device(self):
-        return self.is_special.device
-
-    def to(self, device: str):
-        self.is_special = self.is_special.to(device)
-        return self
-
-    def to_config(self):
-        return {
-            'size': self.size,
-            'segment': self.segment,
-        }
-
-    def encode(self, text: str, *, add_sink: bool = True) -> dict:
-        if self.segment_sent:
-            segments = self.tokenizer_sent.span_tokenize(text)
-        else:
-            segments = [(0, len(text))]
-
-        tokens = list(map(ord, text))
-
-        token_segments = []
-        segment_mask = []
-        segment_starts = []
-
-        prev_segm = None
-        for segm in segments:
-            start, end = segm
-
-            if prev_segm is None:
-                if add_sink:
-                    # add sink
-                    token_segments.append([self.bot_token])
-                    segment_mask.append([False])
-            elif prev_segm[1] == start:
-                # separate the sentences
-                token_segments.append([self.sep_token])
-                segment_mask.append([False])
-            else:
-                prev_start, prev_end = prev_segm
-
-                # everything between the sentences
-                token_segments.append(tokens[prev_end:start])
-                segment_mask.append([False] * (start - prev_end))
-
-            token_segments.append(tokens[start:end])
-            segment_mask.append([True] * (end - start))
-            segment_starts.append(start)
-            prev_segm = segm
-
-        final_s, final_e = prev_segm
-        if final_e != len(tokens):
-            token_segments.append(tokens[final_e:len(tokens)])
-            segment_mask.append([False] * (len(tokens) - final_e))
-
-        all_tokens = chain.from_iterable(token_segments)
-        all_segment_mask = chain.from_iterable(segment_mask)
-
-        tokens_torch = torch.tensor(list(all_tokens), device=self.device, dtype=torch.int)
-        tokens_torch[tokens_torch >= self.size] = self.unk_token
-
-        return {
-            'tokens': tokens_torch,
-            'segment_mask': torch.tensor(list(all_segment_mask), device=self.device, dtype=torch.bool),
-            'specials_mask': self.is_special[tokens_torch],
-            'segment_starts': torch.tensor(segment_starts, device=self.device, dtype=torch.int),
-        }
-
-    def decode(self, tokens: Iterable[int]) -> str:
-        # skip sink and pad tokens
-        return ''.join(chr(o) for o in tokens if o != self.bot_token)
-
-def generate_train_test_split(source: str | Path, dest: str | Path, *, split: float = 0.95):
-    source = Path(source)
-    dest = Path(dest)
-
-    if not source.exists():
-        raise FileNotFoundError
-
-    dest.mkdir(parents=True, exist_ok=True)
-
-    with open(source, 'r') as file:
-        content = file.read()
-
-    tokenizer = Tokenizer(segment='sentence')
-    tokenized = tokenizer.encode(content, add_sink=False)
-
-    np_tokens = tokenized['tokens'].numpy().astype(np.uint8)
-    np_segment_mask = tokenized['segment_mask'].numpy().astype(bool)
-    np_special_mask = tokenized['specials_mask'].numpy().astype(bool)
-    np_segment_starts = tokenized['segment_starts'].numpy().astype(int)
-
-    n_token  = len(np_tokens)
-    n_sent = len(np_segment_starts)
-
-    print(f'Read {n_token} tokens and {n_sent} sentences')
-
-    n_sent = len(np_segment_starts)
-    n_train_sent = int(n_sent * split)
-    n_val_sent = n_sent - n_train_sent
-
-    np_segment_ends = np.roll(np_segment_starts, -1)
-    np_segment_ends[-1] = n_token
-    segm_len = np_segment_ends - np_segment_starts
-
-    n_train_tokens = int(segm_len[:n_train_sent].sum())
-    n_val_tokens = len(np_tokens) - n_train_tokens
-
-    print(f'Split: {n_train_tokens}/{n_val_tokens} tokens, {n_train_sent}/{n_val_sent} sentences')
-
-    train_token_mask = torch.concat([
-        torch.ones(n_train_tokens, dtype=torch.bool),
-        torch.zeros(n_val_tokens, dtype=torch.bool)
-    ])
-    val_token_mask = ~train_token_mask
-
-    train_sent_mask = torch.concat([
-        torch.ones(n_train_sent, dtype=torch.bool),
-        torch.zeros(n_val_sent, dtype=torch.bool)
-    ])
-    val_sent_mask = ~train_sent_mask
-
-    np_tokens_train = np_tokens[train_token_mask]
-    np_segment_mask_train = np_segment_mask[train_token_mask]
-    np_special_mask_train = np_special_mask[train_token_mask]
-    np_segment_starts_train = np_segment_starts[train_sent_mask]
-
-    np_tokens_val = np_tokens[val_token_mask]
-    np_segment_mask_val = np_segment_mask[val_token_mask]
-    np_special_mask_val = np_special_mask[val_token_mask]
-    np_segment_starts_val = np_segment_starts[val_sent_mask]
-
-    train_path = dest / 'train'
-    train_path.mkdir(exist_ok=True)
-
-    np.save(train_path / 'tokens.npy', np_tokens_train)
-    np.save(train_path / 'segment_mask.npy', np_segment_mask_train)
-    np.save(train_path / 'special_mask.npy', np_special_mask_train)
-    np.save(train_path / 'segment_starts.npy', np_segment_starts_train)
-
-    val_path = path / 'val'
-    val_path.mkdir(exist_ok=True)
-
-    np.save(val_path / 'tokens.npy', np_tokens_val)
-    np.save(val_path / 'segment_mask.npy', np_segment_mask_val)
-    np.save(val_path / 'special_mask.npy', np_special_mask_val)
-    np.save(val_path / 'segment_starts.npy', np_segment_starts_val)
-
-
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self, path: str | Path, *, start_token: int, target_length: int):
-        path = Path(path)
-        assert path.exists() and path.is_dir()
-
-        tokens_path = path / 'tokens.npy'
-        segment_mask = path / 'segment_mask.npy'
-        special_mask = path / 'special_mask.npy'
-        segment_starts = path / 'segment_starts.npy'
-
-        self.start_token = start_token
-        self.target_length = target_length
-
-        self.tokens = np.memmap(tokens_path, dtype=np.uint8, mode='r')
-        self.segment_mask = np.memmap(segment_mask, dtype=bool, mode='r')
-        self.special_mask = np.memmap(special_mask, dtype=bool, mode='r')
-        self.segment_starts = np.load(segment_starts)
-
-    def __len__(self):
-        return len(self.segment_starts)
-
-    def __getitem__(self, idx):
-        start_idx = self.segment_starts[idx]
-        end_idx = start_idx + self.target_length - 1  # reserve one token for start_token
-
-        tokens = torch.tensor(self.tokens[start_idx:end_idx].astype(int))
-        segment_mask = torch.tensor(self.segment_mask[start_idx:end_idx])
-        special_mask = torch.tensor(self.special_mask[start_idx:end_idx])
-
-        return {
-            'tokens': torch.concatenate([tokens.new_tensor([self.start_token]), tokens]),
-            'segment_mask': torch.concatenate([segment_mask.new_tensor([False]), segment_mask]),
-            'specials_mask': torch.concatenate([special_mask.new_tensor([True]), special_mask])
-        }
-
-
-class Collator:
-    def __init__(self, padding_token: int, move_to: str = 'cpu'):
-        self.padding_token = padding_token
-        self.move_to = move_to
-
-    def __call__(self, batch):
-        tokens = tuple(item['tokens'] for item in batch)
-        tokens_padded = pad_sequence(tokens, batch_first=True, padding_value=self.padding_token)
-
-        segment_mask = tuple(item['segment_mask'] for item in batch)
-        segment_mask_padded = pad_sequence(segment_mask, batch_first=True, padding_value=False)
-
-        specials_mask = tuple(item['specials_mask'] for item in batch)
-        specials_mask_padded = pad_sequence(specials_mask, batch_first=True, padding_value=False)
-
-        return {
-            'tokens': tokens_padded.to(self.move_to),
-            'segment_mask': segment_mask_padded.to(self.move_to),
-            'specials_mask': specials_mask_padded.to(self.move_to),
-        }
-
-
-def calculate_intervals(boundary_mask):
-    # Find cumulative sum of the gaps to identify different intervals
-    interval_idx = torch.cumsum(boundary_mask, dim=-1) + 1
-    shifted = interval_idx.roll(1)
-    shifted[:, 0] = interval_idx[:, 0]
-
-    return shifted
-
-
-def create_mask(
-        tokens: torch.Tensor,
-        segment_mask: torch.Tensor,
-        specials_mask: torch.Tensor,
-        *,
-        padding_token: int,
-        cache_size: int = 0,
-        mask_words_distance: int = 0,
-        mask_segments_distance: int = 0,
-        device: str | None = None
-):
-    if device is None:
-        device = tokens.device
-
-    batch_size, seq_length = tokens.shape
-
-    word_interval_idx = calculate_intervals(specials_mask)
-
-    segment_boundaries_mask = ~segment_mask
-    segment_interval_idx = calculate_intervals(segment_boundaries_mask)
-
-    def causal_mask(b, h, q_idx, kv_idx):
-        return (q_idx + cache_size) >= kv_idx
-
-    def padding_mask(b, h, q_idx, kv_idx):
-        q_token = tokens[b, q_idx + cache_size]
-        kv_token = tokens[b, kv_idx]
-        return torch.ne(q_token, padding_token) & torch.ne(kv_token, padding_token)
-
-    def word_mask(b, h, q_idx, kv_idx):
-        q_interval_id = word_interval_idx[b, q_idx + cache_size]
-        kv_interval_id = word_interval_idx[b, kv_idx]
-
-        return (torch.eq(specials_mask[b, kv_idx], True)
-                | ((q_idx + cache_size) - kv_idx < mask_words_distance)
-                | torch.eq(q_interval_id, kv_interval_id))
-
-    def segment_mask(b, h, q_idx, kv_idx):
-        q_interval_id = segment_interval_idx[b, q_idx + cache_size]
-        kv_interval_id = segment_interval_idx[b, kv_idx]
-
-        return (torch.eq(segment_boundaries_mask[b, kv_idx], True)
-                | ((q_idx + cache_size) - kv_idx < mask_segments_distance)
-                | torch.eq(q_interval_id, kv_interval_id))
-
-    return create_block_mask(
-        mask_mod=and_masks(causal_mask, padding_mask, word_mask, segment_mask),
-        B=batch_size,
-        H=None,
-        Q_LEN=seq_length - cache_size,
-        KV_LEN=seq_length,
-        device=device,
-        _compile=True,
-        BLOCK_SIZE=128,
-    )
-
-
-@torch.no_grad()
-def generate(
-        seed: str,
-        model: Generator,
-        tokenizer: Tokenizer,
-        *,
-        device: str,
-        max_length: int,
-        amp_enabled: bool = True,
-        progress_bar: bool = True,
-) -> str:
-    model.eval()
-
-    model = model.to(device)
-    tokenizer = tokenizer.to(device)
-
-    inputs = tokenizer.encode(seed)
-    tokens = inputs['tokens']
-    segment_mask = inputs['segment_mask']
-    specials_mask = inputs['specials_mask']
-
-    past_keys = None
-    past_values = None
-
-    for _ in tqdm(
-            range(len(tokens), max_length),
-            total=max_length - len(tokens),
-            desc="Generating",
-            disable=not progress_bar
-    ):
-        with torch.amp.autocast(enabled=amp_enabled, device_type=device):
-            outputs = model(
-                # batch_size = 1
-                tokens=tokens.unsqueeze(0),
-                segment_mask=segment_mask.unsqueeze(0),
-                specials_mask=specials_mask.unsqueeze(0),
-                past_keys=past_keys,
-                past_values=past_values
-            )
-
-        # update current state of masks and tokens
-
-        predicted_token = torch.argmax(outputs.logits[0, -1])
-        predicted_segment = torch.argmax(outputs.logits_segment[0, -1]).to(dtype=torch.bool)
-        is_predicted_special = tokenizer.is_special[predicted_token.item()]
-
-        tokens = torch.concatenate([tokens, predicted_token.view(1)], dim=0)
-        segment_mask = torch.concatenate([segment_mask, predicted_segment.view(1)], dim=0)
-        specials_mask = torch.concatenate([specials_mask, is_predicted_special.view(1)], dim=0)
-
-        # update past keys and values
-
-        past_keys = outputs.keys
-        past_values = outputs.values
-
-    return tokenizer.decode(tokens)
-
-
-class DummyModel(Generator):
-    def __init__(
-            self,
-            vocab_size: int = 128,
-            n_layers: int = 36,
-            head_dim: int = 128,
-            n_heads: int = 64,
-            pad_token: int = 127,
-            device: str = 'cpu',
-            attn_impl: str = 'flex',
-    ):
-        nn.Module.__init__(self)
-
-        self.n_layers = n_layers
-        self.head_dim = head_dim
-        self.n_heads = n_heads
-        self.hidden_dim = self.n_heads * self.head_dim
-        self.vocab_size = vocab_size
-        self.pad_token = pad_token
-        self.attn_impl = attn_impl
-
-        self.emb = nn.Embedding(self.vocab_size, self.hidden_dim, device=device, dtype=torch.bfloat16)
-        self.lm_head = nn.Linear(self.hidden_dim, self.vocab_size, device=device, dtype=torch.bfloat16)
-        self.segment_head = nn.Linear(self.hidden_dim, 2, device=device, dtype=torch.bfloat16)
-
-    def forward(
-            self,
-            tokens: torch.Tensor,
-            segment_mask: torch.Tensor,
-            specials_mask: torch.Tensor,
-            past_keys: list[torch.Tensor] | None = None,
-            past_values: list[torch.Tensor] | None = None,
-            **_,
-    ):
-        batch_size, seq_length = tokens.shape
-        device = tokens.device
-        assert device == self.emb.weight.device
-
-        if past_keys is None or not len(past_keys):
-            past_keys = [
-                torch.empty((batch_size, 0, self.hidden_dim), device=device, dtype=torch.bfloat16)
-                for _ in range(self.n_layers)
-            ]
-
-        if past_values is None or not len(past_values):
-            past_values = [
-                torch.empty((batch_size, 0, self.hidden_dim), device=device, dtype=torch.bfloat16)
-                for _ in range(self.n_layers)
-            ]
-
-        cache_size = past_keys[0].shape[1]
-        # cache at each layer should be of equal size
-        assert all(cache.shape[1] == cache_size for cache in past_values)
-        assert all(cache.shape[1] == cache_size for cache in past_keys)
-
-        new_len = seq_length - cache_size
-
-        hidden = self.emb(tokens[:, cache_size:])
-
-        if self.attn_impl == 'flex':
-            mask = create_mask(
-                tokens, segment_mask, specials_mask,
-                cache_size=cache_size,
-                padding_token=self.pad_token
-            )
-
-        for layer_idx in range(self.n_layers):
-            # read cache
-            hidden_k = torch.concatenate([hidden, past_keys[layer_idx]], dim=1)
-            hidden_v = torch.concatenate([hidden, past_values[layer_idx]], dim=1)
-
-            # update cache
-            past_keys[layer_idx] = hidden_k.detach()
-            past_values[layer_idx] = hidden_v.detach()
-
-            # calculate new hidden for next layer
-
-            # (B, S, H) -> (B, kh, S, Hh)
-            hidden = hidden.view(batch_size, new_len, self.n_heads, self.head_dim).transpose(1, 2)
-            hidden_k = hidden_k.view(batch_size, seq_length, self.n_heads, self.head_dim).transpose(1, 2)
-            hidden_v = hidden_v.view(batch_size, seq_length, self.n_heads, self.head_dim).transpose(1, 2)
-
-            if self.attn_impl == 'flex':
-                hidden = flex_attention(hidden, hidden_k, hidden_v, block_mask=mask)
-            elif self.attn_impl == 'sdpa':
-                hidden = sdpa(hidden, hidden_k, hidden_v, is_causal=True)
-            hidden = hidden.transpose(1, 2).contiguous().view(batch_size, new_len, -1)
-
-        return ModelOutput(
-            # project from hidden space to logit space
-            logits=self.lm_head(hidden),
-            logits_segment=self.segment_head(hidden),
-            keys=past_keys,
-            values=past_values
+        return (
+                (~is_mem_kv & ~is_mem_q & main2main_causal & main2main_windowed)
+                | (is_mem_kv & ~is_mem_q & main2mem_causal)
+                | (is_mem_kv & is_mem_q & mem2mem_causal)
+                | (~is_mem_kv & is_mem_q & mem2main_causal & mem2main_windowed)
         )
 
-
-if __name__ == '__main__':
-    print(f'Device detected: {torch.cuda.get_device_name(0)}')
-
-    to_encode = 'I am a token. You are a token...........  So what?'
-    print(f'Encoding example for {to_encode}:')
-    print(Tokenizer(segment='sentence+word').encode(to_encode))
-
-    if not DATASET_PATH.exists():
-        print(f'Downloading {DATASET_SOURCE}...')
-        response = requests.get(DATASET_SOURCE)
-
-        with open(DATASET_PATH, 'wb') as file:
-            file.write(response.content)
-
-        print(f'Saved {DATASET_SOURCE} at {DATASET_PATH}')
-    else:
-        print(f'Found dataset at {DATASET_PATH}')
-
-    if not PREPROCESSED_PATH.exists():
-        print('Generating train/val splits...')
-        generate_train_test_split(DATASET_SOURCE, PRETOKENIZED_DATASET_PATH)
-    else:
-        print(f'Found preprocessed dataset at {PRETOKENIZED_DATASET_PATH}')
-
-    impl = 'flex'
-
-    model = torch.compile(DummyModel(device='cuda', attn_impl='flex'), dynamic=True)
-    tokenizer = Tokenizer(device='cuda', segment='word+sentence')
-
-    print('Testing model...')
-    print('Generation: ', end='')
-
-    res = generate(test_str, model, tokenizer, max_length=len(test_str) + 100, device='cuda', amp_enabled=True)
-    if res is not None:
-        print('Ok!')
-    else:
-        print('Failed!')
+    return causal_window_mask_with_mem
 
 
+# benchmark forward
+batch_size = 1
+
+block_size = 128
+window_size = block_size * 8
+compile_warmup = 100
+n_trials = 100
+
+min_blocks = 1
+max_blocks = 1000
+
+# llama3 8b
+kv_heads = 32 # 8
+q_heads = 32
+head_dim = 4096 // q_heads
+
+data = []
+context_sizes = [block_size * i for i in range(min_blocks, max_blocks, 50)]
+
+mem_freqs = [2, 8, 32, 128]
+
+
+def benchmark(
+        attn_impl, input_len: int, res_base: dict, do_compile: bool = True, dtype=torch.bfloat16,
+        **extra_kwargs
+) -> Iterator[dict]:
+    torch.compiler.reset()
+    attn_impl = torch.compile(attn_impl, dynamic=False, mode='max-autotune-no-cudagraphs') if do_compile else attn_impl
+
+    # compilation warmup
+    if do_compile:
+        with torch.autograd.profiler.profile(use_device='cuda') as prof:
+            for _ in range(compile_warmup):
+                input_k = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
+                input_v = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
+                input_q = torch.randn(size=(batch_size, input_len, q_heads, head_dim), dtype=dtype, device='cuda')
+
+                with torch.no_grad():
+                    assert attn_impl(input_q, input_k, input_v, **extra_kwargs) is not None
+            torch.cuda.synchronize(device=None)
+
+        print(f'Compiled time: {(prof.profiling_end_time_ns - prof.profiling_start_time_ns) / 1e6:.4f}ms')
+
+    for _ in range(n_trials):
+        input_k = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
+        input_v = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
+        input_q = torch.randn(size=(batch_size, input_len, q_heads, head_dim), dtype=dtype, device='cuda')
+
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize(device=None)
+
+        with torch.autograd.profiler.profile(use_device='cuda') as prof:
+            with torch.no_grad():
+                assert attn_impl(input_q, input_k, input_v, **extra_kwargs).sum() < torch.inf
+                torch.cuda.synchronize(device=None)
+
+        peak_mem = torch.cuda.max_memory_allocated()
+
+        time_ns = prof.profiling_end_time_ns - prof.profiling_start_time_ns
+
+        # Record results
+        yield {
+            **res_base,
+            'time_taken_ms': time_ns / 1e6,
+            'memory_used_mb': peak_mem / 1024 / 1024
+        }
+
+
+# causal sdpa
+
+for context_size in tqdm(context_sizes):
+    try:
+        curr_res = []
+        for res in benchmark(
+                scaled_dot_product_attention, context_size,
+                {'impl': 'sdpa_causal', 'context_length': context_size},
+                enable_gqa=False, is_causal=True
+        ):
+            data.append(res)
+            curr_res.append(res)
+
+        print(f'Sum time: {pd.DataFrame(curr_res)["time_taken_ms"].sum():.4f}ms')
+    except Exception as e:
+        print(e)
+        break
+
+
+# causal flex
+
+def causal_mask_mod(b, h, q_idx, kv_idx):
+    return kv_idx <= q_idx
+
+
+for context_size in tqdm(context_sizes):
+    mask = create_block_mask(causal_mask_mod, None, None, context_size, context_size, device='cuda',
+                             BLOCK_SIZE=block_size, _compile=True)
+    print(f'Sparsity: {mask.sparsity():.2f}%')
+
+    try:
+        curr_res = []
+        for res in benchmark(
+                flex_attention, context_size,
+                {'impl': 'flex_causal', 'context_length': context_size},
+                enable_gqa=False, block_mask=mask
+        ):
+            data.append(res)
+            curr_res.append(res)
+
+        print(f'Sum time: {pd.DataFrame(curr_res)["time_taken_ms"].sum():.4f}ms')
+    except Exception as e:
+        print(e)
+        break
+
+
+# causal window attention
+
+def window_mask_mod(b, h, q_idx, kv_idx):
+    return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)
+
+
+for context_size in tqdm(context_sizes):
+    mask = create_block_mask(window_mask_mod, None, None, context_size, context_size, device='cuda',
+                             BLOCK_SIZE=block_size, _compile=True)
+    print(f'Sparsity: {mask.sparsity():.2f}%')
+
+    try:
+        for res in benchmark(
+                flex_attention, context_size,
+                {'impl': 'flex_window', 'context_length': context_size},
+                enable_gqa=True, block_mask=mask
+        ):
+            data.append(res)
+    except Exception as e:
+        print(e)
+        break
+
+
+df = pd.DataFrame(data)
+sns.lineplot(df, x='context_length', y='time_taken_ms', hue='impl')
+
+df.to_csv('perf.csv')
