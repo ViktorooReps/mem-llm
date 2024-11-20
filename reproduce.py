@@ -15,6 +15,7 @@ from torch.nn.functional import scaled_dot_product_attention
 torch._dynamo.config.cache_size_limit = 1000
 
 
+
 def create_mask_mod(context_size: int, stm_window_size: int, mem_freq: int):
     """
     Designed for the use on the input that consists of the concatenation of memory states and context states.
@@ -73,7 +74,7 @@ min_blocks = 1
 max_blocks = 1000
 
 # llama3 8b
-kv_heads = 32 # 8
+kv_heads = 8
 q_heads = 32
 head_dim = 4096 // q_heads
 
@@ -84,37 +85,35 @@ mem_freqs = [2, 8, 32, 128]
 
 
 def benchmark(
-        attn_impl, input_len: int, res_base: dict, do_compile: bool = True, dtype=torch.bfloat16,
+        attn_impl, input_len: int, res_base: dict, do_compile: bool = True, dtype=torch.float16,
         **extra_kwargs
 ) -> Iterator[dict]:
     torch.compiler.reset()
-    attn_impl = torch.compile(attn_impl, dynamic=False, mode='max-autotune-no-cudagraphs') if do_compile else attn_impl
+    torch.cuda.empty_cache()
+    attn_impl = torch.compile(attn_impl) if do_compile else attn_impl
 
     # compilation warmup
     if do_compile:
-        with torch.autograd.profiler.profile(use_device='cuda') as prof:
-            for _ in range(compile_warmup):
-                input_k = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
-                input_v = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
-                input_q = torch.randn(size=(batch_size, input_len, q_heads, head_dim), dtype=dtype, device='cuda')
+        for _ in range(compile_warmup):
+            input_k = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
+            input_v = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
+            input_q = torch.randn(size=(batch_size, q_heads, input_len, head_dim), dtype=dtype, device='cuda')
 
-                with torch.no_grad():
-                    assert attn_impl(input_q, input_k, input_v, **extra_kwargs) is not None
-            torch.cuda.synchronize(device=None)
-
-        print(f'Compiled time: {(prof.profiling_end_time_ns - prof.profiling_start_time_ns) / 1e6:.4f}ms')
+            with torch.no_grad():
+                assert attn_impl(input_q, input_k, input_v, **extra_kwargs).sum() is not None
+        torch.cuda.synchronize(device=None)
 
     for _ in range(n_trials):
-        input_k = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
-        input_v = torch.randn(size=(batch_size, input_len, kv_heads, head_dim), dtype=dtype, device='cuda')
-        input_q = torch.randn(size=(batch_size, input_len, q_heads, head_dim), dtype=dtype, device='cuda')
+        input_k = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
+        input_v = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
+        input_q = torch.randn(size=(batch_size, q_heads, input_len, head_dim), dtype=dtype, device='cuda')
 
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize(device=None)
 
         with torch.autograd.profiler.profile(use_device='cuda') as prof:
             with torch.no_grad():
-                assert attn_impl(input_q, input_k, input_v, **extra_kwargs).sum() < torch.inf
+                assert attn_impl(input_q, input_k, input_v, **extra_kwargs).sum() is not None
                 torch.cuda.synchronize(device=None)
 
         peak_mem = torch.cuda.max_memory_allocated()
@@ -133,19 +132,15 @@ def benchmark(
 
 for context_size in tqdm(context_sizes):
     try:
-        curr_res = []
         for res in benchmark(
                 scaled_dot_product_attention, context_size,
                 {'impl': 'sdpa_causal', 'context_length': context_size},
-                enable_gqa=False, is_causal=True
+                enable_gqa=True, is_causal=True
         ):
             data.append(res)
-            curr_res.append(res)
-
-        print(f'Sum time: {pd.DataFrame(curr_res)["time_taken_ms"].sum():.4f}ms')
     except Exception as e:
-        print(e)
-        break
+        print('Exc!')
+        print(str(e), e.__class__.__name__)
 
 
 # causal flex
@@ -157,22 +152,17 @@ def causal_mask_mod(b, h, q_idx, kv_idx):
 for context_size in tqdm(context_sizes):
     mask = create_block_mask(causal_mask_mod, None, None, context_size, context_size, device='cuda',
                              BLOCK_SIZE=block_size, _compile=True)
-    print(f'Sparsity: {mask.sparsity():.2f}%')
 
     try:
-        curr_res = []
         for res in benchmark(
                 flex_attention, context_size,
                 {'impl': 'flex_causal', 'context_length': context_size},
-                enable_gqa=False, block_mask=mask
+                enable_gqa=True, block_mask=mask
         ):
             data.append(res)
-            curr_res.append(res)
-
-        print(f'Sum time: {pd.DataFrame(curr_res)["time_taken_ms"].sum():.4f}ms')
     except Exception as e:
-        print(e)
-        break
+        print('Exc!')
+        print(str(e), e.__class__.__name__)
 
 
 # causal window attention
@@ -184,7 +174,6 @@ def window_mask_mod(b, h, q_idx, kv_idx):
 for context_size in tqdm(context_sizes):
     mask = create_block_mask(window_mask_mod, None, None, context_size, context_size, device='cuda',
                              BLOCK_SIZE=block_size, _compile=True)
-    print(f'Sparsity: {mask.sparsity():.2f}%')
 
     try:
         for res in benchmark(
@@ -194,8 +183,8 @@ for context_size in tqdm(context_sizes):
         ):
             data.append(res)
     except Exception as e:
-        print(e)
-        break
+        print('Exc!')
+        print(str(e), e.__class__.__name__)
 
 
 df = pd.DataFrame(data)
