@@ -1,18 +1,13 @@
-import numpy as np
 import pandas as pd
 import torch
 
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
-import seaborn as sns
-import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 
 from typing import Iterator
 
 from torch.nn.functional import scaled_dot_product_attention
-
-torch._dynamo.config.cache_size_limit = 1000
 
 
 
@@ -26,39 +21,37 @@ def create_mask_mod(context_size: int, stm_window_size: int, mem_freq: int):
 
     mem_end = main_start
 
+
     def causal_window_mask_with_mem(b, h, q_idx, kv_idx):
         # differentiator of main from mem parts
         is_mem_kv = (kv_idx < mem_end)
         is_mem_q = (q_idx < mem_end)
 
-        # only valid for mem part
+        # the first tokens are mem, so we realign with 0
+        main_kv_idx = kv_idx - main_start
+        main_q_idx = q_idx - main_start
+
+        # mem tokens are really at every mem_freq position
         mem_kv_idx = kv_idx * mem_freq
         mem_q_idx = q_idx * mem_freq
 
-        # the first tokens are mem, so we realign with 0
-        # only valid for main part
-        kv_idx = kv_idx - main_start
-        q_idx = q_idx - main_start
-
-        main2main_causal = (kv_idx <= q_idx)
-        main2main_windowed = (q_idx - kv_idx < stm_window_size)
+        causal_main_diagonal = (kv_idx <= q_idx)
+        main2main_windowed = (main_q_idx - main_kv_idx < stm_window_size)  # [s, e)
 
         # without window when attending to mem
-        main2mem_causal = (mem_kv_idx <= q_idx)
-        mem2mem_causal = (mem_kv_idx <= mem_q_idx)
+        # <= to include the diagonal
+        main2mem_causal = (mem_kv_idx <= main_q_idx)
 
-        mem2main_causal = (
-                    kv_idx < mem_q_idx)  # not <=!! we restrict attending to immediate token: 0 does not attend to 0 etc.
-        mem2main_windowed = (
-                    mem_q_idx - kv_idx <= stm_window_size)  # not <!! extend window by 1 since we took 1 token off other side
+        # do not include the diagonal!
+        mem2main_causal = (main_kv_idx < mem_q_idx)
+        # we did not include the diagonal, so add 1 token more here
+        mem2main_windowed = (mem_q_idx - main_kv_idx <= stm_window_size)  # (s, e]
 
-        return (
-                (~is_mem_kv & ~is_mem_q & main2main_causal & main2main_windowed)
-                | (is_mem_kv & ~is_mem_q & main2mem_causal)
-                | (is_mem_kv & is_mem_q & mem2mem_causal)
-                | (~is_mem_kv & is_mem_q & mem2main_causal & mem2main_windowed)
-        )
-
+        case_main2main = (~is_mem_kv & ~is_mem_q & causal_main_diagonal & main2main_windowed)
+        case_main2mem = (is_mem_kv & ~is_mem_q & main2mem_causal)
+        case_mem2mem = (is_mem_kv & is_mem_q & causal_main_diagonal)
+        case_mem2main = (~is_mem_kv & is_mem_q & mem2main_causal & mem2main_windowed)
+        return case_main2main | case_main2mem | case_mem2mem | case_mem2main  # (3)
     return causal_window_mask_with_mem
 
 
@@ -67,7 +60,7 @@ batch_size = 1
 
 block_size = 128
 window_size = block_size * 8
-compile_warmup = 100
+compile_warmup = 25
 n_trials = 100
 
 min_blocks = 1
@@ -95,18 +88,22 @@ def benchmark(
     # compilation warmup
     if do_compile:
         for _ in range(compile_warmup):
-            input_k = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
-            input_v = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
-            input_q = torch.randn(size=(batch_size, q_heads, input_len, head_dim), dtype=dtype, device='cuda')
+            torch.cuda.empty_cache()
+
+            input_k = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda').contiguous()
+            input_v = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda').contiguous()
+            input_q = torch.randn(size=(batch_size, q_heads, input_len, head_dim), dtype=dtype, device='cuda').contiguous()
 
             with torch.no_grad():
                 assert attn_impl(input_q, input_k, input_v, **extra_kwargs).sum() is not None
         torch.cuda.synchronize(device=None)
 
     for _ in range(n_trials):
-        input_k = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
-        input_v = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda')
-        input_q = torch.randn(size=(batch_size, q_heads, input_len, head_dim), dtype=dtype, device='cuda')
+        torch.cuda.empty_cache()
+
+        input_k = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda').contiguous()
+        input_v = torch.randn(size=(batch_size, kv_heads, input_len, head_dim), dtype=dtype, device='cuda').contiguous()
+        input_q = torch.randn(size=(batch_size, q_heads, input_len, head_dim), dtype=dtype, device='cuda').contiguous()
 
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize(device=None)
@@ -187,7 +184,30 @@ for context_size in tqdm(context_sizes):
         print(str(e), e.__class__.__name__)
 
 
-df = pd.DataFrame(data)
-sns.lineplot(df, x='context_length', y='time_taken_ms', hue='impl')
 
-df.to_csv('perf.csv')
+# causal window attention with memory
+
+for context_size in tqdm(context_sizes):
+    try:
+        for mem_freq in tqdm(mem_freqs, leave=False):
+            mem_size = (context_size // mem_freq) + (context_size % mem_freq > 0)
+            mask = create_block_mask(
+                create_mask_mod(context_size, window_size, mem_freq),
+                None, None, context_size + mem_size, context_size + mem_size, device='cuda', BLOCK_SIZE=block_size,
+                _compile=True
+            )
+
+            for res in benchmark(
+                    flex_attention, context_size + mem_size,
+                    {'impl': f'flex_window_mem_compr{mem_freq}', 'context_length': context_size},
+                    enable_gqa=True, block_mask=mask
+            ):
+                data.append(res)
+    except Exception as e:
+        print('Exc!')
+        print(str(e), e.__class__.__name__)
+
+
+
+df = pd.DataFrame(data)
+df.to_csv('perf_forward.csv')
