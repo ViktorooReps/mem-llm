@@ -5,4 +5,4 @@ pip3 install --pre torch torchvision torchaudio --index-url https://download.pyt
 
 # download the datasets
 
-python -c "from char_llm.dataset import load_dataset, TSConfig, FineWebEduConfig; load_dataset(TSConfig()); load_dataset(FineWebEduConfig())"
+python -c "from char_llm.dataset import load_dataset, TSConfig, FineWebEduConfig; load_dataset(TSConfig(target_length=1)); load_dataset(FineWebEduConfig(target_length=1))"
