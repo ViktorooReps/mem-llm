@@ -1,4 +1,4 @@
-pip install requirements.txt
+pip install -r requirements.txt
 
 # as of 25/11/2024, to enable FlexAttention, you need a nightly version
 pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
