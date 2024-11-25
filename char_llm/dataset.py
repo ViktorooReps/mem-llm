@@ -131,7 +131,7 @@ def load_dataset_ts(config: TSConfig) -> (GuaranteedLengthDataset, GuaranteedLen
 @dataclass
 class FineWebEduConfig:
     target_length: int
-    train_length: int = 1_000_000_000
+    train_length: int = 5_000_000_000
     val_length: int = 1_000_000
 
     download_config: DownloadConfig | None = None
@@ -232,7 +232,7 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
     train_size = int(config.train_length)
     val_size = int(config.val_length)
 
-    def process_example(example):
+    def process_example(example) -> int | None:
         total_written_train = train_last_location[0]
         total_written_val = val_last_location[0]
 
@@ -241,7 +241,7 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
         elif total_written_val < val_size:
             return tokenize_and_write(example, tokenizer, val_memmap, val_last_location, val_size, val_lock)
 
-        return 0
+        return None
 
     with ThreadPoolExecutor() as executor:
         bar = tqdm(total=train_size + val_size)
@@ -255,11 +255,11 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
             stop_processing = False
             for future in futures:
                 progress = future.result()
-                bar.update(progress)
-
-                if not progress:
+                if progress is None:
                     stop_processing = True
                     break
+
+                bar.update(progress)
 
             if stop_processing:
                 break
