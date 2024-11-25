@@ -224,6 +224,7 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
         split='train',
         download_mode=DownloadMode.FORCE_REDOWNLOAD,
         columns=['text'],
+        revision='3ba9d605774198c5868892d7a8deda78031a781f'
     ), num_workers=4, prefetch_factor=8, batch_size=32)
     tokenizer = Tokenizer()
 
