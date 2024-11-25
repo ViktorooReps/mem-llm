@@ -8,9 +8,9 @@ import numpy as np
 import requests
 import torch
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
 from char_llm.custom_logging import logger
+from char_llm.custom_tqdm import HumanizedTqdm
 from char_llm.tokenizer import Tokenizer
 
 from datasets import load_dataset as load_dataset_from_hub, DownloadConfig, DownloadMode
@@ -244,7 +244,7 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
         return None
 
     with ThreadPoolExecutor() as executor:
-        bar = tqdm(total=train_size + val_size)
+        bar = HumanizedTqdm(total=train_size + val_size, unit='tokens')
         for batch in dataset_loader:
             futures = []
 
