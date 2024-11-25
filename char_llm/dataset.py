@@ -168,8 +168,6 @@ def tokenize_and_write(
     if isinstance(texts, str):
         texts = [texts]
 
-    print(texts)
-
     total_written = 0
 
     for text in texts:
@@ -182,8 +180,6 @@ def tokenize_and_write(
 
         # Write the tokens on disk
         arr[start_location:end_location] = tokens[:to_write]
-
-        logger.info((start_location, end_location))
 
         total_written += to_write
 
@@ -223,10 +219,11 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
     val_lock = Lock()
 
     dataset_loader = DataLoader(load_dataset_from_hub(
-        'HuggingFaceFW/fineweb-edu',
+        'HuggingFaceTB/smollm-corpus', 'fineweb-edu-dedup',
         streaming=True,
         split='train',
         download_mode=DownloadMode.FORCE_REDOWNLOAD,
+        columns=['text'],
     ), num_workers=4, prefetch_factor=8, batch_size=32)
     tokenizer = Tokenizer()
 
