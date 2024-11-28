@@ -18,13 +18,10 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from mem_llm.custom_logging import logger
+from mem_llm.custom_tqdm import abbreviate_number
 from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteSampler
 from mem_llm.interface import Configurable, ModelOutput
 from mem_llm.model import MemLLM
-
-# for debug
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
 
 
 RUNS_DIR = 'runs'
@@ -419,6 +416,9 @@ def evaluate(context: TrainingContext):
 
 def train(context: TrainingContext):
     context.model.train()
+
+    model_params = sum(p.numel() for p in context.model.parameters())
+    logger.info(f'Running training for model with {abbreviate_number(model_params)}')
 
     config = context.config
 
