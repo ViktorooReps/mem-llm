@@ -25,6 +25,7 @@
     "n_kv_heads": 4,
     "head_dims": 128,
     "mlp_hidden_dims_expansion": 2.0,
+    "rotary_inv_freq_base": 10000.0,
     "n_layers": 24,
     "local_window": 16,
     "global_window": 64,

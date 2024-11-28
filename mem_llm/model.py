@@ -58,32 +58,35 @@ class CastedLinear(nn.Linear):
 
 class Rotary(torch.nn.Module):
 
-    def __init__(self, dim, base=10000):
+    def __init__(self, dims: int, base: float, device: torch.device, dtype: torch.dtype):
         super().__init__()
-        self.dim = dim
+        self.dims = dims
         self.base = base
-        self.inv_freq = None
-        self.seq_len_cached = None
-        self.cos_cached = None
-        self.sin_cached = None
+        self.device = device
+        self.dtype = dtype
+        self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dims, 2, device=self.device).float() / self.dims))
 
-    def forward(self, x):
-        seq_len = x.shape[1]
-        if seq_len != self.seq_len_cached:
-            self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=x.device).float() / self.dim))
-            self.seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-            freqs = torch.outer(t, self.inv_freq)
-            self.cos_cached = freqs.cos().bfloat16()
-            self.sin_cached = freqs.sin().bfloat16()
-        cos, sin = self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
+    def forward(
+            self,
+            x: torch.Tensor,  # (B, L, H)
+            x_pos: torch.Tensor,  # (B, L)
+    ) -> torch.Tensor:
+
+        t = x_pos.type_as(self.inv_freq)
+        freqs = torch.outer(t, self.inv_freq)
+
+        cos_freq = freqs.cos().to(self.dtype)[None, :, None, :]
+        sin_freq = freqs.sin().to(self.dtype)[None, :, None, :]
+
         # apply_rotary_emb(x, cos, sin)
-        assert x.ndim == 4 # multihead attention
-        d = x.shape[3]//2
+        assert x.ndim == 4  # multihead attention
+
+        d = x.shape[3] // 2
         x1 = x[..., :d]
         x2 = x[..., d:]
-        y1 = x1 * cos + x2 * sin
-        y2 = x1 * (-sin) + x2 * cos
+        y1 = x1 * cos_freq + x2 * sin_freq
+        y2 = x1 * (-sin_freq) + x2 * cos_freq
+
         return torch.cat([y1, y2], 3).type_as(x)
 
 
@@ -94,8 +97,9 @@ class CausalSelfAttention(nn.Module):
             n_q_heads: int,
             n_kv_heads: int,
             head_dims: int,
-            device: torch.device | None,
-            dtype: torch.dtype | None
+            rotary_inv_freq_base: float,
+            device: torch.device,
+            dtype: torch.dtype
     ):
         super().__init__()
 
@@ -117,7 +121,7 @@ class CausalSelfAttention(nn.Module):
         self.value_residual_coeff = nn.Parameter(torch.tensor(0.5))
 
         # rotary embeddings
-        self.rotary = Rotary(self.head_dims)
+        self.rotary = Rotary(self.head_dims, rotary_inv_freq_base)
 
         # output projection
         self.out_proj = CastedLinear(self.hidden_dims, self.hidden_dims, **extras)
@@ -126,6 +130,7 @@ class CausalSelfAttention(nn.Module):
     def forward(
             self,
             x: torch.Tensor,  # (B, L, H)
+            x_pos: torch.Tensor,  # (B, L)
             cache: Cache | None,
             block_mask: BlockMask | None
     ) -> (torch.Tensor, Cache | None):
@@ -146,7 +151,7 @@ class CausalSelfAttention(nn.Module):
             pos, k, v = cache.pos, cache.keys, cache.values
 
         q, k = norm(q), norm(k)
-        q, k = self.rotary(q), self.rotary(k)
+        q, k = self.rotary(q, x_pos), self.rotary(k, x_pos)
 
         # TODO: soft cap score mod
         y = flex_attention(
@@ -185,6 +190,7 @@ class TransformerBlock(nn.Module):
             n_kv_heads: int,
             head_dims: int,
             mlp_hidden_dims_expansion: float,
+            rotary_inv_freq_base: float,
             device: torch.device,
             dtype: torch.dtype
     ):
@@ -195,19 +201,20 @@ class TransformerBlock(nn.Module):
         self.hidden_dims = n_q_heads * head_dims
         self.mlp_hidden_dims = int(self.hidden_dims * mlp_hidden_dims_expansion)
 
-        self.attn = CausalSelfAttention(n_q_heads, n_kv_heads, head_dims, **extras)
+        self.attn = CausalSelfAttention(n_q_heads, n_kv_heads, head_dims, rotary_inv_freq_base, **extras)
         self.mlp = MLP(self.hidden_dims, self.mlp_hidden_dims, **extras)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
     def forward(
             self,
-            x: torch.Tensor,
+            x: torch.Tensor,  # (B, L, H)
+            x_pos: torch.Tensor,  # (B, L)
             embed_residual: torch.Tensor | None,
             block_mask: BlockMask | None
     ) -> torch.Tensor:
 
         x = self.lambdas[0] * x + self.lambdas[1] * embed_residual
-        x = x + self.attn(norm(x), block_mask)
+        x = x + self.attn(norm(x), x_pos, block_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -276,6 +283,7 @@ class MemLLM(Generator, Configurable):
             n_kv_heads: int = 4,
             head_dims: int = 128,
             mlp_hidden_dims_expansion: float = 2.0,
+            rotary_inv_freq_base: float = 10_000.0,
             n_layers: int = 24,
             local_window: int = 128,
             global_window: int = 128,
@@ -296,6 +304,7 @@ class MemLLM(Generator, Configurable):
         self.n_kv_heads = n_kv_heads
         self.head_dims = head_dims
         self.mlp_hidden_dims_expansion = mlp_hidden_dims_expansion
+        self.rotary_inv_freq_base = rotary_inv_freq_base
         self.n_layers = n_layers
         self.local_window = local_window
         self.global_window = global_window
@@ -322,6 +331,7 @@ class MemLLM(Generator, Configurable):
                 n_kv_heads=self.n_kv_heads,
                 head_dims=self.head_dims,
                 mlp_hidden_dims_expansion=self.mlp_hidden_dims_expansion,
+                rotary_inv_freq_base=self.rotary_inv_freq_base,
                 **extras
             )
             for _ in range(self.n_layers)
@@ -358,6 +368,7 @@ class MemLLM(Generator, Configurable):
             'n_kv_heads': self.n_kv_heads,
             'head_dims': self.head_dims,
             'mlp_hidden_dims_expansion': self.mlp_hidden_dims_expansion,
+            'rotary_inv_freq_base': self.rotary_inv_freq_base,
             'n_layers': self.n_layers,
             'local_window': self.local_window,
             'global_window': self.global_window,
@@ -429,8 +440,6 @@ class MemLLM(Generator, Configurable):
         absolute_token_positions = torch.arange(seq_length, device=doc_end_indices.device, dtype=torch.int)
         document_positions = absolute_token_positions - doc_shifts_per_token
 
-        print(document_positions, document_positions.shape)
-
         is_mem = ((document_positions % self.mem_freq) == 0)
         mem_pos = document_positions[is_mem]
         mem_doc_ids = doc_ids_per_token[is_mem]
@@ -439,15 +448,13 @@ class MemLLM(Generator, Configurable):
 
         full_positions = torch.concat([mem_pos, document_positions], dim=0)
         full_doc_ids = torch.concat([mem_doc_ids, doc_ids_per_token], dim=0)
+        full_eos_mask = torch.concat([eos_mask.new_ones(n_mem), eos_mask], dim=0)
 
         def document_mask(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
             # attend only within the same document and do not attend to and from <eos> tokens
-            print(doc_ids_per_token, doc_ids_per_token.shape)
-            print(q_idx)
-            print(kv_idx)
             return ((full_doc_ids[q_idx] == full_doc_ids[kv_idx])
-                    & ~eos_mask[q_idx]
-                    & ~eos_mask[kv_idx])
+                    & ~full_eos_mask[q_idx]
+                    & ~full_eos_mask[kv_idx])
 
         block_mask = create_block_mask(
             and_masks(document_mask, create_mem_window_mask_mod(
@@ -468,6 +475,7 @@ class MemLLM(Generator, Configurable):
 
         # inner modules work with batched data
         x = x.unsqueeze(0)
+        x_pos = full_positions.unsqueeze(0)
 
         embeds = None
         if self.embeds_residual:
@@ -479,13 +487,13 @@ class MemLLM(Generator, Configurable):
 
         # Encoder pass - process only the first half of the blocks
         for i in range(self.num_encoder_layers):
-            x = self.transformer_blocks[i](x, embeds, block_mask)
+            x = self.transformer_blocks[i](x, x_pos, embeds, block_mask)
             skip_connections.append(x)
 
         # Decoder pass - process the remaining blocks with weighted skip connections
         for i in range(self.num_decoder_layers):
             x = x + self.unet_skip_weights[i] * skip_connections.pop()
-            x = self.transformer_blocks[self.num_encoder_layers + i](x, embeds, block_mask)
+            x = self.transformer_blocks[self.num_encoder_layers + i](x, x_pos, embeds, block_mask)
 
         # drop memory for logits computation
         x = x[n_mem:]
