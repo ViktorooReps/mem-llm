@@ -1,6 +1,6 @@
 import torch
 
-from char_llm.interface import Configurable
+from mem_llm.interface import Configurable
 
 
 class Tokenizer(Configurable):
@@ -28,8 +28,7 @@ class Tokenizer(Configurable):
         return tokens_torch
 
     def decode(self, tokens: torch.Tensor) -> str:
-        # skip sink and pad tokens
-        return ''.join(chr(o) for o in tokens)
+        return ''.join(chr(o.item()) for o in tokens)
 
 
 if __name__ == '__main__':

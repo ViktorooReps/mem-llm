@@ -2,16 +2,16 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
 from pathlib import Path
 from threading import Lock
-from typing import TypeVar, Callable
+from typing import TypeVar, Callable, Sized, Dict, Type
 
 import numpy as np
 import requests
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
-from char_llm.custom_logging import logger
-from char_llm.custom_tqdm import HumanizedTqdm
-from char_llm.tokenizer import Tokenizer
+from mem_llm.custom_logging import logger
+from mem_llm.custom_tqdm import HumanizedTqdm
+from mem_llm.tokenizer import Tokenizer
 
 from datasets import load_dataset as load_dataset_from_hub, DownloadConfig, DownloadMode
 
@@ -22,57 +22,83 @@ TS_DATASET_SOURCE = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/
 FWE_PRETOKENIZED_DATASET_PATH = Path('data/fineweb-edu')
 
 
+@dataclass
+class DatasetConfig:
+    example_length: int
+
+    # to be defined in subclasses
+    source_dtype: np.dtype
+    dataset_name: str = None
+
+
+class InfiniteSampler(Sampler):
+    def __init__(self, len_datasource: int):
+        super().__init__(None)
+        self.len_datasource = len_datasource
+
+    def __iter__(self):
+        while True:
+            yield np.random.randint(0, self.len_datasource)
+
+    def __len__(self):
+        return self.len_datasource  # Doesn't apply in practice since it's infinite.
+
+
 class GuaranteedLengthDataset(torch.utils.data.Dataset):
-    def __init__(self, path: str | Path, *, target_length: int):
+    def __init__(self, path: str | Path, *, example_length: int, source_dtype: np.dtype, limit_dataset_length: int):
         path = Path(path)
         assert path.exists() and path.is_dir()
 
         tokens_path = path / 'tokens.dat'
         assert tokens_path.exists() and tokens_path.is_file()
 
-        self.target_length = target_length
-        self.tokens = np.memmap(tokens_path, dtype=np.uint8, mode='r')
+        self.example_length = example_length
+        self.tokens = np.memmap(tokens_path, dtype=source_dtype, mode='r')
+        self.dataset_length = min(len(self.tokens), limit_dataset_length)
 
     def __len__(self):
-        return len(self.tokens) - self.target_length
+        return self.dataset_length - self.example_length
 
     def __getitem__(self, idx):
         if idx >= len(self):
             raise IndexError
 
         start_idx = idx
-        end_idx = start_idx + self.target_length
+        end_idx = start_idx + self.example_length
 
         return torch.tensor(self.tokens[start_idx:end_idx], dtype=torch.int)
 
 
-def create_token_memmap(file_path: str | Path, shape: tuple[int, ...]):
-    return np.memmap(file_path, dtype=np.uint8, mode='w+', shape=shape)
+def create_token_memmap(file_path: str | Path, shape: tuple[int, ...], source_dtype: np.dtype):
+    return np.memmap(file_path, dtype=source_dtype, mode='w+', shape=shape)
 
 
-def save_memmap(file_path: str | Path, array: np.ndarray):
+def save_memmap(file_path: str | Path, array: np.ndarray, source_dtype: np.dtype):
     file_path = Path(file_path)
-    memmap_array = create_token_memmap(file_path, array.shape)
+    memmap_array = create_token_memmap(file_path, array.shape, source_dtype)
     memmap_array[:] = array[:]
     del memmap_array  # Flush changes and close memmap
 
 
 @dataclass
-class TSConfig:
-    target_length: int
+class TSConfig(DatasetConfig):
     split: float = 0.95
 
+    # do not change these
+    source_dtype: np.dtype = np.uint8
     dataset_name: str = 'tiny-shakespear'
 
 
 def load_dataset_ts(config: TSConfig) -> (GuaranteedLengthDataset, GuaranteedLengthDataset):
     logger.info(f'Loading {config.dataset_name}')
 
+    extras = {'source_dtype': config.source_dtype, 'example_length': config.example_length}
+
     if TS_PRETOKENIZED_DATASET_PATH.exists():
         logger.info(f'Found {TS_PRETOKENIZED_DATASET_PATH}')
         return (
-            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'train', target_length=config.target_length),
-            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'val', target_length=config.target_length)
+            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'train', **extras),
+            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'val', **extras)
         )
 
     if not TS_DATASET_PATH.exists():
@@ -95,7 +121,7 @@ def load_dataset_ts(config: TSConfig) -> (GuaranteedLengthDataset, GuaranteedLen
     tokenizer = Tokenizer()
     tokenized = tokenizer.encode(content)
 
-    np_tokens = tokenized.numpy().astype(np.uint8)
+    np_tokens = tokenized.numpy().astype(config.source_dtype)
 
     n_token = len(np_tokens)
 
@@ -115,28 +141,27 @@ def load_dataset_ts(config: TSConfig) -> (GuaranteedLengthDataset, GuaranteedLen
     train_path = dest / 'train'
     train_path.mkdir(exist_ok=True)
 
-    save_memmap(train_path / 'tokens.dat', np_tokens_train)
+    save_memmap(train_path / 'tokens.dat', np_tokens_train, config.source_dtype)
 
     val_path = dest / 'val'
     val_path.mkdir(exist_ok=True)
 
-    save_memmap(val_path / 'tokens.dat', np_tokens_val)
+    save_memmap(val_path / 'tokens.dat', np_tokens_val, config.source_dtype)
 
     return (
-        GuaranteedLengthDataset(train_path, target_length=config.target_length),
-        GuaranteedLengthDataset(val_path, target_length=config.target_length)
+        GuaranteedLengthDataset(train_path, **extras),
+        GuaranteedLengthDataset(val_path, **extras)
     )
 
 
 @dataclass
-class FineWebEduConfig:
-    target_length: int
+class FineWebEduConfig(DatasetConfig):
     train_length: int = 5_000_000_000
     val_length: int = 1_000_000
 
-    download_config: DownloadConfig | None = None
-
-    dataset_name: str = 'tiny-fineweb'
+    # do not change these
+    source_dtype: np.dtype = np.uint8
+    dataset_name: str = 'char-fineweb-edu'
 
 
 def get_write_location(
@@ -159,7 +184,8 @@ def tokenize_and_write(
         arr: np.memmap,
         last_location: list[int],
         max_location: int,
-        lock: Lock
+        lock: Lock,
+        source_dtype: np.dtype
 ):
     """
     Tokenize an example and write it to memmap.
@@ -171,7 +197,7 @@ def tokenize_and_write(
     total_written = 0
 
     for text in texts:
-        tokens = tokenizer.encode(text, add_eos=True).numpy().astype(np.uint8)
+        tokens = tokenizer.encode(text, add_eos=True).numpy().astype(source_dtype)
         token_length = len(tokens)
 
         # Update the last location safely
@@ -189,11 +215,21 @@ def tokenize_and_write(
 def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, GuaranteedLengthDataset):
     logger.info(f"Loading {config.dataset_name}")
 
+    extras = {'source_dtype': config.source_dtype, 'example_length': config.example_length}
+
     if FWE_PRETOKENIZED_DATASET_PATH.exists():
         logger.info(f"Found {FWE_PRETOKENIZED_DATASET_PATH}")
         return (
-            GuaranteedLengthDataset(FWE_PRETOKENIZED_DATASET_PATH / 'train', target_length=config.target_length),
-            GuaranteedLengthDataset(FWE_PRETOKENIZED_DATASET_PATH / 'val', target_length=config.target_length),
+            GuaranteedLengthDataset(
+                FWE_PRETOKENIZED_DATASET_PATH / 'train',
+                **extras,
+                limit_dataset_length=config.train_length
+            ),
+            GuaranteedLengthDataset(
+                FWE_PRETOKENIZED_DATASET_PATH / 'val',
+                **extras,
+                limit_dataset_length=config.val_length
+            ),
         )
 
     dest = FWE_PRETOKENIZED_DATASET_PATH
@@ -209,8 +245,8 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
     val_file = val_path / "tokens.dat"
 
     # Pre-allocate memmap files
-    train_memmap = create_token_memmap(train_file, (config.train_length,))
-    val_memmap = create_token_memmap(val_file, (config.val_length,))
+    train_memmap = create_token_memmap(train_file, (config.train_length,), config.source_dtype)
+    val_memmap = create_token_memmap(val_file, (config.val_length,), config.source_dtype)
 
     # Initialize shared indices and locks
     train_last_location = [0]  # Shared variable to track train memmap location
@@ -237,9 +273,13 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
         total_written_val = val_last_location[0]
 
         if total_written_train < train_size:
-            return tokenize_and_write(example, tokenizer, train_memmap, train_last_location, train_size, train_lock)
+            return tokenize_and_write(
+                example, tokenizer, train_memmap, train_last_location, train_size, train_lock, config.source_dtype
+            )
         elif total_written_val < val_size:
-            return tokenize_and_write(example, tokenizer, val_memmap, val_last_location, val_size, val_lock)
+            return tokenize_and_write(
+                example, tokenizer, val_memmap, val_last_location, val_size, val_lock, config.source_dtype
+            )
 
         return None
 
@@ -273,12 +313,13 @@ def load_dataset_fwe(config: FineWebEduConfig) -> (GuaranteedLengthDataset, Guar
     del val_memmap
 
     return (
-        GuaranteedLengthDataset(train_path, target_length=config.target_length),
-        GuaranteedLengthDataset(val_path, target_length=config.target_length),
+        GuaranteedLengthDataset(train_path, **extras, limit_dataset_length=config.train_length),
+        GuaranteedLengthDataset(val_path, **extras, limit_dataset_length=config.val_length),
     )
 
 
 DATASET_LOADERS = {
+    DatasetConfig: lambda *_, **__: (None, None),
     TSConfig: load_dataset_ts,
     FineWebEduConfig: load_dataset_fwe
 }
@@ -287,14 +328,15 @@ DATASET_LOADERS = {
 DATASET_CONFIGS = {config_type.dataset_name: config_type for config_type in DATASET_LOADERS}
 
 
-def load_dataset(config) -> GuaranteedLengthDataset:
+def load_dataset(config: DatasetConfig) -> (GuaranteedLengthDataset, GuaranteedLengthDataset):
+    """Returns train and validation splits"""
     return DATASET_LOADERS[type(config)](config)
 
 
-_T = TypeVar('_T')
+_T = TypeVar('_T', bound=DatasetConfig)
 
 
-def register_dataset(config_type: _T, loader: Callable[[_T], GuaranteedLengthDataset]):
+def register_dataset(config_type: _T, loader):
     assert hasattr(config_type, 'dataset_name')
     assert is_dataclass(config_type)
     DATASET_CONFIGS[config_type.dataset_name] = config_type
@@ -304,7 +346,7 @@ def register_dataset(config_type: _T, loader: Callable[[_T], GuaranteedLengthDat
 if __name__ == '__main__':
     tokenizer = Tokenizer()
     data_train, data_val = load_dataset_fwe(FineWebEduConfig(
-        target_length=100,
+        example_length=100,
         train_length=1000,
         val_length=1000
     ))

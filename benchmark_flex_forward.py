@@ -21,7 +21,6 @@ def create_mask_mod(context_size: int, stm_window_size: int, mem_freq: int):
 
     mem_end = main_start
 
-
     def causal_window_mask_with_mem(b, h, q_idx, kv_idx):
         # differentiator of main from mem parts
         is_mem_kv = (kv_idx < mem_end)
@@ -206,7 +205,6 @@ for context_size in tqdm(context_sizes):
     except Exception as e:
         print('Exc!')
         print(str(e), e.__class__.__name__)
-
 
 
 df = pd.DataFrame(data)
