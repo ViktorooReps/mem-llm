@@ -418,7 +418,7 @@ def train(context: TrainingContext):
     context.model.train()
 
     model_params = sum(p.numel() for p in context.model.parameters())
-    logger.info(f'Running training for model with {abbreviate_number(model_params)}')
+    logger.info(f'Running training for model with {abbreviate_number(model_params)} parameters')
 
     config = context.config
 

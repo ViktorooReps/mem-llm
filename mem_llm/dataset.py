@@ -45,7 +45,7 @@ class InfiniteSampler(Sampler):
 
 
 class GuaranteedLengthDataset(torch.utils.data.Dataset):
-    def __init__(self, path: str | Path, *, example_length: int, source_dtype: np.dtype, limit_dataset_length: int):
+    def __init__(self, path: str | Path, *, example_length: int, source_dtype: np.dtype, limit_dataset_length: int | None = None):
         path = Path(path)
         assert path.exists() and path.is_dir()
 
@@ -54,7 +54,7 @@ class GuaranteedLengthDataset(torch.utils.data.Dataset):
 
         self.example_length = example_length
         self.tokens = np.memmap(tokens_path, dtype=source_dtype, mode='r')
-        self.dataset_length = min(len(self.tokens), limit_dataset_length)
+        self.dataset_length = min(len(self.tokens), limit_dataset_length) if limit_dataset_length is not None else len(self.tokens)
 
     def __len__(self):
         return self.dataset_length - self.example_length
@@ -97,8 +97,8 @@ def load_dataset_ts(config: TSConfig) -> (GuaranteedLengthDataset, GuaranteedLen
     if TS_PRETOKENIZED_DATASET_PATH.exists():
         logger.info(f'Found {TS_PRETOKENIZED_DATASET_PATH}')
         return (
-            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'train', **extras),
-            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'val', **extras)
+            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'train', **extras, limit_dataset_length=None),
+            GuaranteedLengthDataset(TS_PRETOKENIZED_DATASET_PATH / 'val', **extras, limit_dataset_length=None)
         )
 
     if not TS_DATASET_PATH.exists():
@@ -149,8 +149,8 @@ def load_dataset_ts(config: TSConfig) -> (GuaranteedLengthDataset, GuaranteedLen
     save_memmap(val_path / 'tokens.dat', np_tokens_val, config.source_dtype)
 
     return (
-        GuaranteedLengthDataset(train_path, **extras),
-        GuaranteedLengthDataset(val_path, **extras)
+        GuaranteedLengthDataset(train_path, **extras, limit_dataset_length=None),
+        GuaranteedLengthDataset(val_path, **extras, limit_dataset_length=None)
     )
 
 
