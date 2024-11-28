@@ -219,10 +219,12 @@ class TransformerBlock(nn.Module):
         return x
 
 
+
 def create_mem_window_mask_mod(
         pos: torch.Tensor,
         *,
         n_mem: int,
+        mem_pad: int,
         global_window: int,
         local_window: int
 ) -> _mask_mod_signature:
@@ -244,6 +246,10 @@ def create_mem_window_mask_mod(
         is_mem_kv = (kv_idx < n_mem)
         is_mem_q = (q_idx < n_mem)
 
+        # FIXME: remove padding once https://github.com/pytorch/pytorch/issues/139064 is resolved
+        is_mem_pad_kv = ~is_mem_kv & (kv_idx < n_mem + mem_pad)
+        is_mem_pad_q = ~is_mem_q & (q_idx < n_mem + mem_pad)
+
         causal = (kv_pos <= q_pos)
 
         window_local = (q_pos - kv_pos < local_window)
@@ -262,9 +268,13 @@ def create_mem_window_mask_mod(
         case_main2mem = (is_mem_kv & ~is_mem_q & causal & window_global)
         case_mem2mem = (is_mem_kv & is_mem_q & causal & window_global)
         case_mem2main = (~is_mem_kv & is_mem_q & causal_mem2main & window_mem2main)
-        return case_main2main | case_main2mem | case_mem2mem | case_mem2main
+        return (case_main2main | case_main2mem | case_mem2mem | case_mem2main) & ~is_mem_pad_kv & ~is_mem_pad_q
 
     return causal_window_mask_with_mem
+
+
+# FIXME: remove padding once https://github.com/pytorch/pytorch/issues/139064 is resolved
+target_n_mem_padded = None
 
 
 class MemLLM(Generator, Configurable):
@@ -446,9 +456,28 @@ class MemLLM(Generator, Configurable):
 
         n_mem = len(mem_pos)
 
-        full_positions = torch.concat([mem_pos, document_positions], dim=0).contiguous()
-        full_doc_ids = torch.concat([mem_doc_ids, doc_ids_per_token], dim=0).contiguous()
-        full_eos_mask = torch.concat([eos_mask.new_ones(n_mem), eos_mask], dim=0).contiguous()
+        # FIXME: FlexAttention is horrible with dynamic shapes https://github.com/pytorch/pytorch/issues/139064,
+        #  so we pad here up to block size to hopefully avoid different shapes during training. But this will not work
+        #  on every input, I've only tested it on FineWeb-Edu.
+        global target_n_mem_padded
+
+        if target_n_mem_padded is None:
+            mem_pad = 128 - n_mem % 128
+            if mem_pad < 64:
+                mem_pad += 128
+            target_n_mem_padded = mem_pad
+        else:
+            mem_pad = target_n_mem_padded
+
+        full_positions = torch.concat([
+            mem_pos, mem_pos.new_zeros(mem_pad), document_positions
+        ], dim=0)
+        full_doc_ids = torch.concat([
+            mem_doc_ids, mem_doc_ids.new_zeros(mem_pad), doc_ids_per_token
+        ], dim=0).contiguous()
+        full_eos_mask = torch.concat([
+            eos_mask.new_ones(n_mem), eos_mask.new_zeros(mem_pad), eos_mask
+        ], dim=0).contiguous()
 
         def document_mask(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
             # attend only within the same document and do not attend to and from <eos> tokens
@@ -460,6 +489,7 @@ class MemLLM(Generator, Configurable):
             and_masks(document_mask, create_mem_window_mask_mod(
                 pos=full_positions,
                 n_mem=n_mem,
+                mem_pad=mem_pad,
                 local_window=self.local_window,
                 global_window=self.global_window,
             )),
