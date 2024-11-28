@@ -1,1 +1,3 @@
 /data
+/runs/*/checkpoints
+/runs/*/model

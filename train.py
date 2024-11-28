@@ -71,6 +71,7 @@ class TrainingConfig(Configurable):
     metrics_file: str = None  # determined automatically with run_name
     log_per_steps: int = 50
     disable_progress_bar: bool = False
+    rewrite_metrics: bool = True
 
     # some extras
     num_dataloader_workers: int = 4
@@ -106,7 +107,7 @@ class TrainingConfig(Configurable):
 
 
 class MetricsLogger(Configurable):
-    def __init__(self, log_file: str | Path, column_names: list[str]):
+    def __init__(self, log_file: str | Path, column_names: list[str], *, rewrite: bool = True):
         self.log_file = Path(log_file)
         self.log_file.parent.mkdir(exist_ok=True, parents=True)
 
@@ -116,7 +117,7 @@ class MetricsLogger(Configurable):
         self.column_names = list(column_names)
 
         # Initialize the log file with column headers
-        if not self.log_file.exists():
+        if not self.log_file.exists() or rewrite:
             with open(self.log_file, 'w') as f:
                 f.write(','.join(self.column_names) + '\n')
 
@@ -197,12 +198,13 @@ class TrainingContext:
         assert path.exists() and path.is_dir()
 
         config = TrainingConfig.load(path / CONFIG_FILE)
+        config.rewrite_metrics = False
 
         context = new_context(config, pretrained_model_path=path / MODEL_DIR)
         context.optimizer.load_state_dict(torch.load(path / OPTIMIZER_FILE, map_location='cpu'))
         context.scheduler.load_state_dict(torch.load(path / SCHEDULER_FILE, map_location='cpu'))
 
-        training_state = torch.load(path / TRAINING_STATE_FILE)
+        training_state = torch.load(path / TRAINING_STATE_FILE, weights_only=False)
 
         context.step = training_state['step']
 
@@ -236,7 +238,7 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
 
     metrics_logger = MetricsLogger(config.metrics_file, column_names=[
         'step', 'seen_tokens', 'time_delta_s', 'run_name', 'lr_mult', 'train_loss', 'val_loss',
-    ])
+    ], rewrite=config.rewrite_metrics)
 
     dataset_name = config.dataset_config['dataset_name']
     dataset_config = DATASET_CONFIGS[dataset_name](**config.dataset_config)
@@ -350,13 +352,23 @@ def prepare_context(config: TrainingConfig) -> TrainingContext:
         if old_config != config:
             raise RuntimeError(f'Config at {config_path} does not match current config! '
                                f'Have you forgotten to change run_name?')
+        
+        # check if the experiment has already been completed
+        model_path = run_dir / MODEL_DIR
+        if model_path.exists() and model_path.is_dir() and len(list(model_path.iterdir())):
+            raise RuntimeError(f'The experiment at {run_dir} has already been finished! See trained model at {model_path}')
 
         # try to load the last checkpoint
         checkpoints = list_checkpoints(config)
         if len(checkpoints):
             last_checkpoint = checkpoints[-1]
             logger.warning(f'Continuing {config.run_name} from the last checkpoint: {last_checkpoint}')
+            config.rewrite_metrics = False  # continue the run, so keep old metrics
             return load_checkpoint(last_checkpoint)
+        
+        logger.critical(f'Rewriting experiment data at {run_dir}! You have 10 seconds to stop this')
+        time.sleep(10.0)
+        config.rewrite_metrics = True
     else:
         config.save(config_path)
 
@@ -381,7 +393,7 @@ def evaluate(context: TrainingContext):
             range(config.eval_steps),
             desc='Evaluating',
             total=config.eval_steps,
-            disable=not config.disable_progress_bar,
+            disable=config.disable_progress_bar,
             leave=False
     ):
         example = next(eval_dataloader)
@@ -392,8 +404,10 @@ def evaluate(context: TrainingContext):
         example = example[:-1].to(config.device)
         target = target[:-1].to(config.device)
 
+        seq_length = len(example)
+
         outputs: ModelOutput = context.model(example)  # noqa
-        running_eval_loss_sum += F.cross_entropy(outputs.logits, target).item()
+        running_eval_loss_sum += F.cross_entropy(outputs.logits.view(seq_length, -1), target.view(seq_length)).item()
 
     if config.device.startswith('cuda'):
         # to compute time delta correctly, should not impact the performance too much
@@ -402,7 +416,7 @@ def evaluate(context: TrainingContext):
     context.metrics_logger.log({
         'step': context.step,
         'run_name': config.run_name,
-        'tokens_seen': context.step * len(example),  # we guarantee the example length with our dataset
+        'seen_tokens': context.step * len(example),  # we guarantee the example length with our dataset
         'time_delta_s': time.time() - eval_start_time,
         'lr_mult': trapezoid_schedule(
             context.step,
@@ -438,7 +452,7 @@ def train(context: TrainingContext):
 
     last_log_time = time.time()
 
-    bar = tqdm(desc='Training', total=config.training_steps, disable=not config.disable_progress_bar, leave=True)
+    bar = tqdm(desc='Training', total=config.training_steps, disable=config.disable_progress_bar, leave=True)
 
     for step_idx in range(last_step, config.training_steps):
         context.step = step_idx
@@ -452,11 +466,13 @@ def train(context: TrainingContext):
         example = example[:-1].to(config.device)
         target = target[:-1].to(config.device)
 
+        seq_length = len(example)
+
         def closure():
             context.optimizer.zero_grad()
 
             outputs: ModelOutput = context.model(example)  # noqa
-            loss = F.cross_entropy(outputs.logits, target)
+            loss = F.cross_entropy(outputs.logits.view(seq_length, -1), target.view(seq_length))
 
             loss.backward()
 
@@ -487,7 +503,7 @@ def train(context: TrainingContext):
             context.metrics_logger.log({
                 'step': context.step,
                 'run_name': config.run_name,
-                'tokens_seen': context.step * len(example),  # we guarantee the example length with our dataset
+                'seen_tokens': context.step * len(example),  # we guarantee the example length with our dataset
                 'time_delta_s': time.time() - last_log_time,
                 'lr_mult': trapezoid_schedule(
                     context.step,
@@ -516,7 +532,7 @@ if __name__ == '__main__':
              f'{os.path.join(RUNS_DIR, "<run_name>", CONFIG_FILE)}'
     )
 
-    parser.add_argument(
+    parser.add_argument(  # TODO: work in cooled/at<step>/ directory. tinker with the config
         '--cooldown_checkpoints',
         type=int,
         nargs='+',

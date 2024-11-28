@@ -71,8 +71,12 @@ class Rotary(torch.nn.Module):
             x: torch.Tensor,  # (B, L, H)
             x_pos: torch.Tensor,  # (B, L)
     ) -> torch.Tensor:
+        
+        if x.shape[0] != 1:
+            # FIXME: torch.outer will not work otherwise
+            raise NotImplementedError() 
 
-        t = x_pos.type_as(self.inv_freq)
+        t = x_pos.type_as(self.inv_freq).squeeze(0)
         freqs = torch.outer(t, self.inv_freq)
 
         cos_freq = freqs.cos().to(self.dtype)[None, :, None, :]
@@ -121,7 +125,7 @@ class CausalSelfAttention(nn.Module):
         self.value_residual_coeff = nn.Parameter(torch.tensor(0.5))
 
         # rotary embeddings
-        self.rotary = Rotary(self.head_dims, rotary_inv_freq_base)
+        self.rotary = Rotary(self.head_dims, rotary_inv_freq_base, **extras)
 
         # output projection
         self.out_proj = CastedLinear(self.hidden_dims, self.hidden_dims, **extras)
@@ -131,9 +135,8 @@ class CausalSelfAttention(nn.Module):
             self,
             x: torch.Tensor,  # (B, L, H)
             x_pos: torch.Tensor,  # (B, L)
-            cache: Cache | None,
             block_mask: BlockMask | None
-    ) -> (torch.Tensor, Cache | None):
+    ) -> torch.Tensor:
 
         # TODO: compute dense variant with cache
 
@@ -143,26 +146,21 @@ class CausalSelfAttention(nn.Module):
         k = self.k_proj(x).view(batch_size, seq_length, self.n_kv_heads, self.head_dims)
         v = self.v_proj(x).view(batch_size, seq_length, self.n_kv_heads, self.head_dims)
 
-        pos = torch.arange(seq_length, device=x.device)
-
-        if cache is not None:
-            cache = cache.update(pos, k, v)
-
-            pos, k, v = cache.pos, cache.keys, cache.values
-
         q, k = norm(q), norm(k)
         q, k = self.rotary(q, x_pos), self.rotary(k, x_pos)
 
         # TODO: soft cap score mod
         y = flex_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+            q.transpose(1, 2).contiguous(), 
+            k.transpose(1, 2).contiguous(), 
+            v.transpose(1, 2).contiguous(),
             block_mask=block_mask,
             enable_gqa=self.gqa_enabled
         )
         y = y.transpose(1, 2).contiguous().view_as(x)  # re-assemble all head outputs side by side
         y = self.out_proj(y)
 
-        return y, cache
+        return y
 
 
 class MLP(nn.Module):
@@ -213,7 +211,9 @@ class TransformerBlock(nn.Module):
             block_mask: BlockMask | None
     ) -> torch.Tensor:
 
-        x = self.lambdas[0] * x + self.lambdas[1] * embed_residual
+        if embed_residual is not None:
+            x = self.lambdas[0] * x + self.lambdas[1] * embed_residual
+        
         x = x + self.attn(norm(x), x_pos, block_mask)
         x = x + self.mlp(norm(x))
         return x
@@ -446,9 +446,9 @@ class MemLLM(Generator, Configurable):
 
         n_mem = len(mem_pos)
 
-        full_positions = torch.concat([mem_pos, document_positions], dim=0)
-        full_doc_ids = torch.concat([mem_doc_ids, doc_ids_per_token], dim=0)
-        full_eos_mask = torch.concat([eos_mask.new_ones(n_mem), eos_mask], dim=0)
+        full_positions = torch.concat([mem_pos, document_positions], dim=0).contiguous()
+        full_doc_ids = torch.concat([mem_doc_ids, doc_ids_per_token], dim=0).contiguous()
+        full_eos_mask = torch.concat([eos_mask.new_ones(n_mem), eos_mask], dim=0).contiguous()
 
         def document_mask(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
             # attend only within the same document and do not attend to and from <eos> tokens
@@ -467,7 +467,7 @@ class MemLLM(Generator, Configurable):
             device=str(tokens.device), _compile=self.do_compile
         )
 
-        x = self.transformer.wte(tokens)
+        x = self.token_embedding(tokens)
         mem = self.mem_embedding.unsqueeze(0).repeat(n_mem, 1)
 
         x = torch.concat([mem, x], dim=0)  # the first n_mem tokens are memory
@@ -496,7 +496,7 @@ class MemLLM(Generator, Configurable):
             x = self.transformer_blocks[self.num_encoder_layers + i](x, x_pos, embeds, block_mask)
 
         # drop memory for logits computation
-        x = x[n_mem:]
+        x = x[:, n_mem:]
 
         x = norm(x)
         logits = self.lm_head(x)

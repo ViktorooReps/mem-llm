@@ -66,7 +66,7 @@ class GuaranteedLengthDataset(torch.utils.data.Dataset):
         start_idx = idx
         end_idx = start_idx + self.example_length
 
-        return torch.tensor(self.tokens[start_idx:end_idx], dtype=torch.int)
+        return torch.tensor(self.tokens[start_idx:end_idx], dtype=torch.long)
 
 
 def create_token_memmap(file_path: str | Path, shape: tuple[int, ...], source_dtype: np.dtype):
