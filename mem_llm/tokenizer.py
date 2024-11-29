@@ -105,8 +105,8 @@ class TikTokenTokenizer(Tokenizer):
 
 
 TOKENIZERS = {
-    CharTokenizer.NAME: CharTokenizer,
-    TikTokenTokenizer.NAME: TikTokenTokenizer,
+    CharTokenizer.TYPE: CharTokenizer,
+    TikTokenTokenizer.TYPE: TikTokenTokenizer,
 }
 
 
