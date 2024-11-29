@@ -1,0 +1,41 @@
+{
+    "training_steps": 30000,
+    "cooldown_steps": 0.2,
+    "warmup_steps": 1000,
+    "eval_steps": 100,
+    "eval_per_steps": 500,
+    "checkpoint_per_steps": 5000,
+    "use_muon": false,
+    "adamw_learning_rate": 0.01,
+    "adamw_beta1": 0.9,
+    "adamw_beta2": 0.95,
+    "adamw_wd": 0.01,
+    "dataset_config": {
+      "example_length": 64000,
+      "dataset_name": "char-fineweb-edu"
+    },
+    "model_config": {
+      "vocab_size": 128,
+      "n_q_heads": 8,
+      "n_kv_heads": 4,
+      "head_dims": 128,
+      "mlp_hidden_dims_expansion": 2.0,
+      "rotary_inv_freq_base": 10000.0,
+      "n_layers": 24,
+      "local_window": 2048,
+      "global_window": 64000,
+      "mem_freq": null,
+      "dtype": "bfloat16",
+      "device": "cuda",
+      "unet_design": false,
+      "embeds_residual": false,
+      "eos_token": 127,
+      "do_compile": true
+    },
+    "device": "cuda",
+    "do_compile": true,
+    "run_name": "window_147M_2048_b64k_s30k",
+    "log_per_steps": 50,
+    "disable_progress_bar": false,
+    "num_dataloader_workers": 4
+  }

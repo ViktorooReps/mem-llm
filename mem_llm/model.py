@@ -475,8 +475,7 @@ class MemLLM(Generator, Configurable):
 
         if target_n_mem_padded is None:
             mem_pad = 128 - n_mem % 128
-            if mem_pad < 64:
-                mem_pad += 128
+            mem_pad += 256
             target_n_mem_padded = mem_pad + n_mem
         else:
             mem_pad = target_n_mem_padded - n_mem
