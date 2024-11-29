@@ -15,9 +15,7 @@
   "adamw_wd": 0.01,
   "dataset_config": {
     "example_length": 64000,
-    "dataset_name": "char-fineweb-edu",
-    "train_length": 5000000,
-    "val_length": 1000000
+    "dataset_name": "char-fineweb-edu"
   },
   "model_config": {
     "vocab_size": 128,
@@ -27,9 +25,9 @@
     "mlp_hidden_dims_expansion": 2.0,
     "rotary_inv_freq_base": 10000.0,
     "n_layers": 24,
-    "local_window": 128,
-    "global_window": 512,
-    "mem_freq": 64,
+    "local_window": 1024,
+    "global_window": 64000,
+    "mem_freq": null,
     "dtype": "bfloat16",
     "device": "cuda",
     "unet_design": false,

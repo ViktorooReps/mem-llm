@@ -75,6 +75,7 @@ class TrainingConfig(Configurable):
 
     # some extras
     num_dataloader_workers: int = 4
+    dataloader_prefetch_factor: int = 8
 
     @classmethod
     def for_run(cls, run_name: str) -> 'TrainingConfig':
@@ -248,12 +249,14 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
     train_dataloader = DataLoader(
         train_data, None,
         sampler=InfiniteSampler(len(train_data)),
-        num_workers=config.num_dataloader_workers
+        num_workers=config.num_dataloader_workers,
+        prefetch_factor=config.dataloader_prefetch_factor,
     )
     eval_dataloader = DataLoader(
         eval_data, None,
         sampler=InfiniteSampler(len(eval_data)),
-        num_workers=config.num_dataloader_workers
+        num_workers=config.num_dataloader_workers,
+        prefetch_factor=config.dataloader_prefetch_factor,
     )
 
     if pretrained_model_path is not None:
@@ -366,9 +369,11 @@ def prepare_context(config: TrainingConfig) -> TrainingContext:
             config.rewrite_metrics = False  # continue the run, so keep old metrics
             return load_checkpoint(last_checkpoint)
         
-        logger.critical(f'Rewriting experiment data at {run_dir}! You have 10 seconds to stop this')
-        time.sleep(10.0)
-        config.rewrite_metrics = True
+        metrics_file = run_dir / METRICS_FILE
+        if metrics_file.exists():
+            logger.critical(f'Rewriting experiment data at {run_dir}! You have 10 seconds to stop this')
+            time.sleep(10.0)
+            config.rewrite_metrics = True
     else:
         config.save(config_path)
 

@@ -12,6 +12,10 @@ from torch.nn.attention.flex_attention import flex_attention, create_block_mask,
 from mem_llm.interface import Generator, Configurable, ModelOutput, Cache
 from mem_llm.noop import Noop
 
+
+torch._dynamo.config.cache_size_limit = 1000
+
+
 flex_attention = torch.compile(flex_attention, dynamic=False)
 create_block_mask = torch.compile(create_block_mask, dynamic=False)
 
@@ -237,6 +241,8 @@ def create_mem_window_mask_mod(
 
     pos: (L,)
     """
+    main_start = n_mem + mem_pad
+
 
     def causal_window_mask_with_mem(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
         q_pos = pos[q_idx]
@@ -247,8 +253,8 @@ def create_mem_window_mask_mod(
         is_mem_q = (q_idx < n_mem)
 
         # FIXME: remove padding once https://github.com/pytorch/pytorch/issues/139064 is resolved
-        is_mem_pad_kv = ~is_mem_kv & (kv_idx < n_mem + mem_pad)
-        is_mem_pad_q = ~is_mem_q & (q_idx < n_mem + mem_pad)
+        is_mem_pad_kv = ~is_mem_kv & (kv_idx < main_start)
+        is_mem_pad_q = ~is_mem_q & (q_idx < main_start)
 
         causal = (kv_pos <= q_pos)
 
@@ -297,7 +303,7 @@ class MemLLM(Generator, Configurable):
             n_layers: int = 24,
             local_window: int = 128,
             global_window: int = 128,
-            mem_freq: int = 64,
+            mem_freq: int | None = 64,  # None for simple window attention
             logit_soft_cap: float | None = None,  # 30.0
             attention_score_soft_cap: float | None = None,
             dtype: str | torch.dtype | None = torch.bfloat16,
@@ -450,9 +456,13 @@ class MemLLM(Generator, Configurable):
         absolute_token_positions = torch.arange(seq_length, device=doc_end_indices.device, dtype=torch.int)
         document_positions = absolute_token_positions - doc_shifts_per_token
 
-        is_mem = ((document_positions % self.mem_freq) == 0)
-        mem_pos = document_positions[is_mem]
-        mem_doc_ids = doc_ids_per_token[is_mem]
+        if self.mem_freq is not None:
+            is_mem = ((document_positions % self.mem_freq) == 0)
+            mem_pos = document_positions[is_mem]
+            mem_doc_ids = doc_ids_per_token[is_mem]
+        else:
+            mem_pos = document_positions.new_empty(0)
+            mem_doc_ids = doc_ids_per_token.new_empty(0)
 
         n_mem = len(mem_pos)
 
@@ -460,14 +470,16 @@ class MemLLM(Generator, Configurable):
         #  so we pad here up to block size to hopefully avoid different shapes during training. But this will not work
         #  on every input, I've only tested it on FineWeb-Edu.
         global target_n_mem_padded
+        if self.mem_freq is None:
+            target_n_mem_padded = 0
 
         if target_n_mem_padded is None:
             mem_pad = 128 - n_mem % 128
             if mem_pad < 64:
                 mem_pad += 128
-            target_n_mem_padded = mem_pad
+            target_n_mem_padded = mem_pad + n_mem
         else:
-            mem_pad = target_n_mem_padded
+            mem_pad = target_n_mem_padded - n_mem
 
         full_positions = torch.concat([
             mem_pos, mem_pos.new_zeros(mem_pad), document_positions
@@ -493,12 +505,12 @@ class MemLLM(Generator, Configurable):
                 local_window=self.local_window,
                 global_window=self.global_window,
             )),
-            None,  None, seq_length + n_mem, seq_length + n_mem,
+            None,  None, seq_length + n_mem + mem_pad, seq_length + n_mem + mem_pad,
             device=str(tokens.device), _compile=self.do_compile
         )
 
         x = self.token_embedding(tokens)
-        mem = self.mem_embedding.unsqueeze(0).repeat(n_mem, 1)
+        mem = self.mem_embedding.unsqueeze(0).repeat(n_mem + mem_pad, 1)  # FIXME: remove padding once https://github.com/pytorch/pytorch/issues/139064 is resolved
 
         x = torch.concat([mem, x], dim=0)  # the first n_mem tokens are memory
         x = norm(x)
@@ -526,7 +538,7 @@ class MemLLM(Generator, Configurable):
             x = self.transformer_blocks[self.num_encoder_layers + i](x, x_pos, embeds, block_mask)
 
         # drop memory for logits computation
-        x = x[:, n_mem:]
+        x = x[:, n_mem + mem_pad:]
 
         x = norm(x)
         logits = self.lm_head(x)
