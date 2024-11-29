@@ -2,14 +2,14 @@ import torch
 
 from mem_llm.custom_tqdm import HumanizedTqdm
 from mem_llm.interface import Generator, ModelOutput, LayerCache
-from mem_llm.tokenizer import Tokenizer
+from mem_llm.tokenizer import CharTokenizer
 
 
 @torch.no_grad()
 def generate(
         seed: str,
         model: Generator,
-        tokenizer: Tokenizer,
+        tokenizer: CharTokenizer,
         *,
         device: str,
         max_length: int,

@@ -19,10 +19,10 @@ from tqdm import tqdm
 
 from mem_llm.custom_logging import logger
 from mem_llm.custom_tqdm import abbreviate_number
-from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteSampler
+from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteDataLoaderWrapper
 from mem_llm.interface import Configurable, ModelOutput
 from mem_llm.model import MemLLM
-
+from mem_llm.tokenizer import TOKENIZERS
 
 RUNS_DIR = 'runs'
 CPTS_DIR = 'checkpoints'
@@ -64,6 +64,10 @@ class TrainingConfig(Configurable):
     model_config: dict = field(default_factory=dict)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     do_compile: bool = True
+
+    # tokenizer
+    tokenizer_type: str = 'tiktoken'
+    tokenizer_config: dict = field(default_factory=dict)
 
     # logging
     run_name: str = None
@@ -158,8 +162,8 @@ class TrainingContext:
 
     # re-instantiated
     metrics_logger: MetricsLogger
-    train_dataloader: DataLoader
-    eval_dataloader: DataLoader
+    train_dataloader: InfiniteDataLoaderWrapper
+    eval_dataloader: InfiniteDataLoaderWrapper
 
     def save(self, path: str | Path):
         path = Path(path)
@@ -241,23 +245,23 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         'step', 'seen_tokens', 'time_delta_s', 'run_name', 'lr_mult', 'train_loss', 'val_loss',
     ], rewrite=config.rewrite_metrics)
 
+    tokenizer = TOKENIZERS[config.tokenizer_type].from_config(config.tokenizer_config)
+
     dataset_name = config.dataset_config['dataset_name']
     dataset_config = DATASET_CONFIGS[dataset_name](**config.dataset_config)
-    train_data, eval_data = load_dataset(dataset_config)
+    train_data, eval_data = load_dataset(dataset_config, tokenizer)
 
     # we set batch_size to None because the batch size is dictated by the example length
-    train_dataloader = DataLoader(
+    train_dataloader = InfiniteDataLoaderWrapper(DataLoader(
         train_data, None,
-        sampler=InfiniteSampler(len(train_data)),
         num_workers=config.num_dataloader_workers,
         prefetch_factor=config.dataloader_prefetch_factor,
-    )
-    eval_dataloader = DataLoader(
+    ))
+    eval_dataloader = InfiniteDataLoaderWrapper(DataLoader(
         eval_data, None,
-        sampler=InfiniteSampler(len(eval_data)),
         num_workers=config.num_dataloader_workers,
         prefetch_factor=config.dataloader_prefetch_factor,
-    )
+    ))
 
     if pretrained_model_path is not None:
         model = MemLLM.load(pretrained_model_path, device=config.device)
@@ -564,5 +568,9 @@ if __name__ == '__main__':
     if not cfg_path.exists():
         raise FileNotFoundError(f'Could not locate a config file at {cfg_path}')
 
-    ctx = prepare_context(TrainingConfig.load(cfg_path))
+    cfg = TrainingConfig.load(cfg_path)
+    if cfg.run_name is None:
+        cfg.run_name = args.run_name
+
+    ctx = prepare_context(cfg)
     train(ctx)

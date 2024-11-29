@@ -13,6 +13,7 @@ from mem_llm.interface import Generator, Configurable, ModelOutput, Cache
 from mem_llm.noop import Noop
 
 
+# for some reason FlexAttention does not work without this
 torch._dynamo.config.cache_size_limit = 1000
 
 

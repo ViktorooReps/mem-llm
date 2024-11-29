@@ -17,7 +17,7 @@ class Configurable(metaclass=abc.ABCMeta):
         pass
 
     @classmethod
-    def from_config(cls: _T, config: dict, **extra_kwargs) -> _T:
+    def from_config(cls: Type[_T], config: dict, **extra_kwargs) -> _T:
         config = deepcopy(config)
         config.update(extra_kwargs)
         return cls(**config)
