@@ -81,6 +81,14 @@ class TikTokenTokenizer(Tokenizer):
         self.name = name
         self.encoding = tiktoken.get_encoding(name)
 
+        real_size = self.encoding.n_vocab
+
+        extra_pad = 0
+        if not (real_size % 128 == 0):
+            extra_pad = 128 - real_size % 128
+
+        self.size_padded = extra_pad
+    
     @property
     def size(self) -> int:
         return self.encoding.n_vocab
@@ -95,7 +103,7 @@ class TikTokenTokenizer(Tokenizer):
         }
 
     def encode(self, text: str, *, add_eos: bool = False) -> torch.Tensor:
-        tokens = self.encoding.encode(text)
+        tokens = self.encoding.encode(text, disallowed_special=())
         if add_eos:
             tokens.append(self.eos_token)
         return torch.tensor(tokens, dtype=torch.long)

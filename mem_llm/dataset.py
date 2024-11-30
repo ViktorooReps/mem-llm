@@ -127,6 +127,8 @@ def load_dataset_ts(config: TSConfig, tokenizer: Tokenizer) -> (GuaranteedLength
     if not TS_DATASET_PATH.exists():
         response = requests.get(TS_DATASET_SOURCE)
 
+        TS_DATASET_PATH.parent.mkdir(exist_ok=True, parents=True)
+
         with open(TS_DATASET_PATH, 'wb') as file:
             file.write(response.content)
 
@@ -141,7 +143,6 @@ def load_dataset_ts(config: TSConfig, tokenizer: Tokenizer) -> (GuaranteedLength
     with open(source, 'r') as file:
         content = file.read()
 
-    tokenizer = CharTokenizer()
     tokenized = tokenizer.encode(content)
 
     np_tokens = tokenized.numpy().astype(source_dtype)
@@ -179,8 +180,9 @@ def load_dataset_ts(config: TSConfig, tokenizer: Tokenizer) -> (GuaranteedLength
 
 @dataclass
 class FineWebEduConfig(DatasetConfig):
-    train_length: int = 5_000_000_000
-    val_length: int = 10_000_000
+    num_download_workers: int = 32
+    train_length: int = 20_000_000_000  # 20B
+    val_length: int = 10_000_000  # 10M
     dataset_name: str = 'fineweb-edu'
 
 
@@ -285,8 +287,7 @@ def load_dataset_fwe(
         download_mode=DownloadMode.FORCE_REDOWNLOAD,
         columns=['text'],
         revision='3ba9d605774198c5868892d7a8deda78031a781f'
-    ), num_workers=4, prefetch_factor=8, batch_size=32)
-    tokenizer = CharTokenizer()
+    ), num_workers=config.num_download_workers, prefetch_factor=8, batch_size=32)
 
     # Iterate over the dataset and split into train/validation
     train_size = int(config.train_length)
@@ -307,7 +308,7 @@ def load_dataset_fwe(
 
         return None
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=config.num_download_workers) as executor:
         bar = HumanizedTqdm(total=train_size + val_size, unit='tokens')
         for batch in dataset_loader:
             futures = []
