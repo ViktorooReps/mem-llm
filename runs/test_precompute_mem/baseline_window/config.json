@@ -1,7 +1,7 @@
 {
   "training_steps": 100000,
   "cooldown_steps": 0.2,
-  "warmup_steps": 1000,
+  "warmup_steps": 5000,
   "eval_steps": 100,
   "eval_per_steps": 500,
   "checkpoint_per_steps": 10000,
@@ -35,5 +35,9 @@
   },
   "log_per_steps": 50,
   "num_dataloader_workers": 4,
-  "dataloader_prefetch_factor": 8
+  "dataloader_prefetch_factor": 8,
+  "start_local_window_size": 32,
+  "start_global_window_size": 128,
+  "local_window_warmup_steps": 0.5,
+  "global_window_warmup_steps": 0.5
 }

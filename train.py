@@ -82,6 +82,15 @@ class TrainingConfig(Configurable):
     num_dataloader_workers: int = 4
     dataloader_prefetch_factor: int = 8
 
+    # window warmup
+    start_local_window_size: int = None  # if None, inferred from the model
+    end_local_window_size: int = None  # if None, inferred from the model
+    local_window_warmup_steps: int | float = 0
+    start_global_window_size: int = None  # if None, inferred from the model
+    end_global_window_size: int = None  # if None, inferred from the model
+    global_window_warmup_steps: int | float = 0
+
+
     @classmethod
     def for_run(cls, run_name: str) -> 'TrainingConfig':
         return cls.load(os.path.join(RUNS_DIR, run_name), run_name=run_name)
@@ -102,11 +111,19 @@ class TrainingConfig(Configurable):
         if self.checkpoints_dir is None:
             self.checkpoints_dir = os.path.join(self.run_dir, CPTS_DIR)
 
+        # steps can be represented as fraction of total train
+
         if isinstance(self.cooldown_steps, float):
             self.cooldown_steps = int(self.cooldown_steps * self.training_steps)
 
         if isinstance(self.warmup_steps, float):
             self.warmup_steps = int(self.warmup_steps * self.training_steps)
+
+        if isinstance(self.local_window_warmup_steps, float):
+            self.local_window_warmup_steps = int(self.local_window_warmup_steps * self.training_steps)
+
+        if isinstance(self.global_window_warmup_steps, float):
+            self.global_window_warmup_steps = int(self.global_window_warmup_steps * self.training_steps)
 
         assert self.eval_steps > 0
         assert self.training_steps >= self.warmup_steps + self.cooldown_steps
@@ -275,6 +292,25 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         model = MemLLM.load(pretrained_model_path, **model_extras)
     else:
         model = MemLLM.from_config(config.model_config, **model_extras)
+
+    model_global_window = model.global_window
+    model_local_window = model.local_window
+
+    # determine values for windows warmup
+    if config.local_window_warmup_steps == 0:
+        config.start_local_window_size = model_local_window
+        config.end_local_window_size = model_local_window
+        config.start_global_window_size = model_global_window
+        config.end_global_window_size = model_global_window
+
+    if config.start_local_window_size is None:
+        config.start_local_window_size = model_local_window
+    if config.end_local_window_size is None:
+        config.end_local_window_size = model_local_window
+    if config.start_global_window_size is None:
+        config.start_global_window_size = model_global_window
+    if config.end_global_window_size is None:
+        config.end_global_window_size = model_global_window
 
     if config.use_muon:
         # Find ≥2D parameters in the body of the network -- these will be optimized by Muon
@@ -465,6 +501,18 @@ def evaluate(context: TrainingContext):
     })
 
 
+def compute_window_size(
+        step: int,
+        start_size: int,
+        end_size: int,
+        warmup_steps: int
+) -> int:
+    if warmup_steps > 0:
+        return int(start_size + (end_size - start_size) * min(step, warmup_steps) / warmup_steps)
+    else:
+        return start_size
+
+
 def train(context: TrainingContext):
     context.model.train()
 
@@ -480,6 +528,18 @@ def train(context: TrainingContext):
 
     if last_step:
         logger.warning(f'Continuing training from last checkpoint at {last_step} step')
+
+    update_local_window = partial(
+        compute_window_size,
+        start_size=config.start_local_window_size, end_size=config.end_local_window_size,
+        warmup_steps=config.local_window_warmup_steps
+    )
+
+    update_global_window = partial(
+        compute_window_size,
+        start_size=config.start_global_window_size, end_size=config.end_global_window_size,
+        warmup_steps=config.global_window_warmup_steps
+    )
 
     # this is fine since our samplers are infinite
     train_dataloader = iter(context.train_dataloader)
@@ -504,6 +564,10 @@ def train(context: TrainingContext):
         target = target[:-1].to(config.device)
 
         seq_length = len(example)
+
+        # the windows can warm up over time
+        context.model.set_local_window(update_local_window(context.step))
+        context.model.set_local_window(update_global_window(context.step))
 
         def closure():
             context.optimizer.zero_grad()
