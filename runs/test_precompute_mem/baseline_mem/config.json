@@ -10,7 +10,8 @@
   "adamw_beta2": 0.95,
   "adamw_wd": 0.01,
   "dataset_config": {
-    "dataset_name": "fineweb-edu"
+    "dataset_name": "fineweb-edu",
+    "example_length": 64000
   },
   "model_config": {
     "n_q_heads": 8,

@@ -3,14 +3,15 @@
   "cooldown_steps": 0.2,
   "warmup_steps": 5000,
   "eval_steps": 100,
-  "eval_per_steps": 500,
+  "eval_per_steps": 1000,
   "checkpoint_per_steps": 10000,
   "adamw_learning_rate": 0.005,
   "adamw_beta1": 0.9,
   "adamw_beta2": 0.95,
   "adamw_wd": 0.01,
   "dataset_config": {
-    "dataset_name": "fineweb-edu"
+    "dataset_name": "fineweb-edu",
+    "example_length": 64000
   },
   "model_config": {
     "n_q_heads": 8,
