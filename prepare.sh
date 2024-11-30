@@ -11,9 +11,9 @@ from mem_llm.tokenizer import CharTokenizer, TikTokenTokenizer
 
 arg1 = '$1'
 if arg1 == 'char':
-    tokenizer = CharTokenizer.from_config('configs/char_tokenizer.json')
+    tokenizer = CharTokenizer.load('configs/char_tokenizer_config.json')
 elif arg1 == 'token':
-    tokenizer = TikTokenTokenizer.from_config('configs/gpt2_tokenizer.json')
+    tokenizer = TikTokenTokenizer.load('configs/gpt2_tokenizer_config.json')
 else:
     raise ValueError(f'Unknown tokenizer type: {arg1}')
 
