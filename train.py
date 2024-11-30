@@ -49,6 +49,7 @@ class TrainingConfig(Configurable):
     # checkpointing
     checkpoint_per_steps: int = 10_000
     checkpoints_dir: str = None  # determined automatically with run_name
+    keep_only_last_checkpoint: bool = True
 
     # optimizer
     use_muon: bool = False
@@ -327,7 +328,10 @@ def list_checkpoints(config: TrainingConfig) -> list[Path]:
     checkpoint_dir = Path(config.checkpoints_dir)
 
     if checkpoint_dir.exists():
-        return list(filter(lambda f: f.is_dir(), checkpoint_dir.glob('checkpoint_*')))
+        return sorted(
+            filter(lambda f: f.is_dir(), checkpoint_dir.glob('checkpoint_*')),
+            key=lambda f: int(f.name.split('_')[-1])
+        )
 
     return []
 
@@ -343,14 +347,31 @@ def load_checkpoint(checkpoint_dir: str | Path) -> TrainingContext:
     return TrainingContext.load(checkpoint_dir)
 
 
-def save_checkpoint(context: TrainingContext):
+def save_checkpoint(context: TrainingContext, *, remove_others: bool = False) -> Path:
     checkpoints_dir = Path(context.config.checkpoints_dir)
     checkpoints_dir.mkdir(exist_ok=True, parents=True)
 
     assert checkpoints_dir.is_dir()
 
+    # Save the current checkpoint
     save_to_checkpoint_dir = checkpoints_dir / f'checkpoint_{context.step}'
     context.save(save_to_checkpoint_dir)
+
+    if not remove_others:
+        return save_to_checkpoint_dir
+
+    # Delete all other checkpoints
+    for checkpoint in checkpoints_dir.glob('checkpoint_*'):
+        if checkpoint != save_to_checkpoint_dir:
+            try:
+                if checkpoint.is_dir():
+                    for sub_file in checkpoint.iterdir():
+                        sub_file.unlink()  # Delete files in the directory
+                    checkpoint.rmdir()  # Delete the directory itself
+            except Exception as e:
+                logger.warning(f"Failed to delete checkpoint {checkpoint}: {e}")
+
+    return save_to_checkpoint_dir
 
 
 def prepare_context(config: TrainingConfig) -> TrainingContext:
@@ -500,7 +521,7 @@ def train(context: TrainingContext):
         steps_without_log += 1
 
         if step_idx > 0 and step_idx % config.checkpoint_per_steps == 0:
-            save_checkpoint(context)
+            save_checkpoint(context, remove_others=config.keep_only_last_checkpoint)
 
         if step_idx > 0 and step_idx % config.eval_per_steps == 0:
             evaluate(context)
