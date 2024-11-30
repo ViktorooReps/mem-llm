@@ -1,8 +1,0 @@
-step,seen_tokens,time_delta_s,run_name,lr_mult,train_loss,val_loss
-50,3199950,235.7605755329132,test_precompute_mem/baseline_window,0.051,9.248774509803921,
-100,6399900,19.608264923095703,test_precompute_mem/baseline_window,0.101,7.719375,
-150,9599850,19.626713275909424,test_precompute_mem/baseline_window,0.151,9.1325,
-200,12799800,19.32834815979004,test_precompute_mem/baseline_window,0.201,10.80625,
-250,15999750,19.254931926727295,test_precompute_mem/baseline_window,0.251,10.8125,
-300,19199700,19.28904104232788,test_precompute_mem/baseline_window,0.301,10.8125,
-350,22399650,19.255935430526733,test_precompute_mem/baseline_window,0.351,10.8125,
