@@ -60,17 +60,17 @@ class TrainingConfig(Configurable):
     adamw_wd: float = 0.01
 
     # model
-    dataset_config: dict = field(default_factory=lambda: {'dataset_name': 'char-fineweb-edu'})
+    dataset_config: dict = field(default_factory=lambda: {'dataset_name': 'fineweb-edu'})
     model_config: dict = field(default_factory=dict)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     do_compile: bool = True
 
     # tokenizer
     tokenizer_type: str = 'tiktoken'
-    tokenizer_config: dict = field(default_factory=dict)
+    tokenizer_config: dict = field(default_factory=lambda: {'name': 'gpt2'})
 
     # logging
-    run_name: str = None
+    run_name: str = None  # set automatically when run from CLI
     run_dir: str = None  # determined automatically with run_name
     metrics_file: str = None  # determined automatically with run_name
     log_per_steps: int = 50
