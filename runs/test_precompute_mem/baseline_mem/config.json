@@ -22,7 +22,7 @@
     "local_window": 1024,
     "global_window": 64000,
     "mem_freq": 64,
-    "precompute_mem": true,
+    "precompute_mem": false,
     "dtype": "bfloat16",
     "unet_design": false,
     "embeds_residual": false,

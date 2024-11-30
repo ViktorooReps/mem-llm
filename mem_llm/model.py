@@ -19,8 +19,11 @@ from mem_llm.noop import Noop
 torch._dynamo.config.cache_size_limit = 1000
 
 
-flex_attention = torch.compile(flex_attention, dynamic=False)
-create_block_mask = torch.compile(create_block_mask, dynamic=False)
+DO_COMPILE = False
+
+if DO_COMPILE:
+    flex_attention = torch.compile(flex_attention, dynamic=False)
+    create_block_mask = torch.compile(create_block_mask, dynamic=False)
 
 
 _T = TypeVar('_T', bound=Configurable)
@@ -315,7 +318,7 @@ def create_mem_window_mask_mod(
         # This causes later is_mem_q to always be False,
         #    as well as is_mem_pad_q to be always False.
         # So practically, we just restrict queries to main tokens
-        q_idx += usual_main_start - main_start_q
+        q_idx = q_idx + usual_main_start - main_start_q
 
         q_pos = pos[q_idx]
         kv_pos = pos[kv_idx]
@@ -387,6 +390,7 @@ def create_mem_block_masks(
 
     if mem_freq is None and separate_mem_and_main_update:
         logger.warning('Possible configuration error: separate_mem_and_main_update=True and mem_freq is not set')
+        separate_mem_and_main_update = False
 
     seq_length = len(tokens)
     if local_window is None:
@@ -402,7 +406,10 @@ def create_mem_block_masks(
     else:
         is_mem = torch.zeros_like(eos_mask)
 
-    n_mem = is_mem.sum().item()
+    mem_pos = document_positions[is_mem]
+    mem_doc_ids = doc_ids_per_token[is_mem]
+
+    n_mem = len(mem_pos)
 
     # FIXME: FlexAttention is horrible with dynamic shapes https://github.com/pytorch/pytorch/issues/139064,
     #  so we pad here up to block size to hopefully avoid different shapes during training. But this will not work
@@ -417,9 +424,6 @@ def create_mem_block_masks(
         target_n_mem_padded = mem_pad + n_mem
     else:
         mem_pad = target_n_mem_padded - n_mem
-
-    mem_pos = document_positions[is_mem]
-    mem_doc_ids = doc_ids_per_token[is_mem]
 
     full_positions = torch.concat([
         mem_pos, mem_pos.new_zeros(mem_pad), document_positions
@@ -439,7 +443,7 @@ def create_mem_block_masks(
 
     def document_mask_main_update(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
         # queries are only main, so we need to shift q_idx accordingly to skip memory
-        q_idx += n_mem + mem_pad
+        q_idx = q_idx + n_mem + mem_pad
         return base_document_mask(b, h, q_idx, kv_idx)
 
     # mem is at the start, so we don't need to shift anything
@@ -666,7 +670,7 @@ class MemLLM(Generator, Configurable):
         batch_size = None
         if len(tokens.shape) == 2 and not use_dense_attention:
             # flatten the batch by treating each example as a separate document
-            batch_size, seq_len = tokens.shape
+            batch_size, _ = tokens.shape
             tokens = torch.concat([tokens, tokens.new_full((batch_size, 1), fill_value=self.eos_token)], dim=-1)
             tokens = tokens.view(-1)
 
@@ -684,7 +688,10 @@ class MemLLM(Generator, Configurable):
                 tokens=tokens,
                 eos_token=self.eos_token,
                 mem_freq=self.mem_freq,
-                separate_mem_and_main_update=self.precompute_mem
+                local_window=self.local_window,
+                global_window=self.global_window,
+                separate_mem_and_main_update=self.precompute_mem,
+                do_compile=self.do_compile
             )
             x_pos = full_positions.unsqueeze(0)
         else:
@@ -701,7 +708,7 @@ class MemLLM(Generator, Configurable):
         # TRANSFORMER PASS =====================================================================
 
         x = self.token_embedding(tokens)
-        mem = self.mem_embedding.unsqueeze(0).repeat(n_mem, 1)
+        mem = self.mem_embedding.view(1, 1, -1).repeat(1, n_mem, 1)
 
         x = torch.concat([mem, x], dim=1)  # the first n_mem tokens are memory
         x = norm(x)

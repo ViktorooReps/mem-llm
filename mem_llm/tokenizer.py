@@ -12,6 +12,9 @@ class Tokenizer(Configurable, metaclass=ABCMeta):
     @property
     def descriptor(self):
         return self.TYPE + '-' + '-'.join(f'{k}{v}' for k, v in self.to_config().items())
+    
+    def __len__(self) -> int:
+        return self.size
 
     @property
     @abstractmethod
