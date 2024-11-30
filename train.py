@@ -260,7 +260,9 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
     not None"""
 
     metrics_logger = MetricsLogger(config.metrics_file, column_names=[
-        'step', 'seen_tokens', 'time_delta_s', 'run_name', 'lr_mult', 'train_loss', 'val_loss',
+        'step', 'seen_tokens', 'time_delta_s', 'run_name',
+        'local_window', 'global_window',
+        'lr_mult', 'train_loss', 'val_loss',
     ], rewrite=config.rewrite_metrics)
 
     tokenizer = TOKENIZERS[config.tokenizer_type].from_config(config.tokenizer_config)
@@ -498,6 +500,8 @@ def evaluate(context: TrainingContext):
             cooldown_steps=config.cooldown_steps
         ),
         'val_loss': running_eval_loss_sum / config.eval_steps,
+        'local_window': context.model.local_window,
+        'global_window': context.model.global_window,
     })
 
 
@@ -613,6 +617,8 @@ def train(context: TrainingContext):
                     cooldown_steps=config.cooldown_steps
                 ),
                 'train_loss': running_train_loss,
+                'local_window': context.model.local_window,
+                'global_window': context.model.global_window,
             })
 
             last_log_time = time.time()
