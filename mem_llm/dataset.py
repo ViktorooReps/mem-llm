@@ -181,7 +181,7 @@ def load_dataset_ts(config: TSConfig, tokenizer: Tokenizer) -> (GuaranteedLength
 class FineWebEduConfig(DatasetConfig):
     train_length: int = 5_000_000_000
     val_length: int = 10_000_000
-    dataset_name: str = 'char-fineweb-edu'
+    dataset_name: str = 'fineweb-edu'
 
 
 def get_write_location(

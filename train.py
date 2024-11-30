@@ -51,11 +51,11 @@ class TrainingConfig(Configurable):
     checkpoints_dir: str = None  # determined automatically with run_name
 
     # optimizer
-    use_muon: bool = True
+    use_muon: bool = False
     muon_momentum: float = 0.95
     muon_learning_rate: float = 0.02
-    adamw_learning_rate: float = 0.01
-    adamw_beta1: float = 0.8
+    adamw_learning_rate: float = 0.005
+    adamw_beta1: float = 0.9
     adamw_beta2: float = 0.95
     adamw_wd: float = 0.01
 
@@ -83,7 +83,7 @@ class TrainingConfig(Configurable):
 
     @classmethod
     def for_run(cls, run_name: str) -> 'TrainingConfig':
-        return cls.load(os.path.join(RUNS_DIR, run_name))
+        return cls.load(os.path.join(RUNS_DIR, run_name), run_name=run_name)
 
     def to_config(self):
         return dataclasses.asdict(self)
@@ -263,10 +263,17 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         prefetch_factor=config.dataloader_prefetch_factor,
     ))
 
+    model_extras = {
+        'device': config.device,
+        # synchronise the model with tokenizer
+        'vocab_size': len(tokenizer),
+        'eos_token': tokenizer.eos_token,
+    }
+
     if pretrained_model_path is not None:
-        model = MemLLM.load(pretrained_model_path, device=config.device)
+        model = MemLLM.load(pretrained_model_path, **model_extras)
     else:
-        model = MemLLM.from_config(config.model_config, device=config.device)
+        model = MemLLM.from_config(config.model_config, **model_extras)
 
     if config.use_muon:
         # Find ≥2D parameters in the body of the network -- these will be optimized by Muon
@@ -355,7 +362,7 @@ def prepare_context(config: TrainingConfig) -> TrainingContext:
 
     config_path = run_dir / CONFIG_FILE
     if config_path.exists():
-        old_config = TrainingConfig.load(config_path)
+        old_config = TrainingConfig.load(config_path, run_name=config.run_name)
         if old_config != config:
             raise RuntimeError(f'Config at {config_path} does not match current config! '
                                f'Have you forgotten to change run_name?')
@@ -391,7 +398,7 @@ def evaluate(context: TrainingContext):
 
     config = context.config
 
-    # this is fine since our samplers are infinite
+    # this is fine since our dataloaders are infinite
     eval_dataloader = iter(context.eval_dataloader)
 
     running_eval_loss_sum = 0.0
@@ -568,9 +575,6 @@ if __name__ == '__main__':
     if not cfg_path.exists():
         raise FileNotFoundError(f'Could not locate a config file at {cfg_path}')
 
-    cfg = TrainingConfig.load(cfg_path)
-    if cfg.run_name is None:
-        cfg.run_name = args.run_name
-
+    cfg = TrainingConfig.load(cfg_path, run_name=args.run_name)
     ctx = prepare_context(cfg)
     train(ctx)

@@ -31,14 +31,14 @@ class Configurable(metaclass=abc.ABCMeta):
             json.dump(config, f, indent=2)
 
     @classmethod
-    def load(cls: Type[_T], path: str | Path) -> _T:
+    def load(cls: Type[_T], path: str | Path, **extra_kwargs) -> _T:
         path = Path(path)
         assert path.exists() and path.is_file()
 
         with open(path, 'r') as f:
             config = json.load(f)
 
-        return cls.from_config(config)
+        return cls.from_config(config, **extra_kwargs)
 
 
 @dataclass

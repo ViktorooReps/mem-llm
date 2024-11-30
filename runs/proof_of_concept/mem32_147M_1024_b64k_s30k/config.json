@@ -10,9 +10,15 @@
     "adamw_beta1": 0.9,
     "adamw_beta2": 0.95,
     "adamw_wd": 0.01,
+    "tokenizer_type": "char",
+    "tokenizer_config": {
+      "vocab_size": 128,
+      "unk_token": 0,
+      "eos_token": 127
+    },
     "dataset_config": {
       "example_length": 64000,
-      "dataset_name": "char-fineweb-edu"
+      "dataset_name": "fineweb-edu"
     },
     "model_config": {
       "vocab_size": 128,
@@ -22,9 +28,9 @@
       "mlp_hidden_dims_expansion": 2.0,
       "rotary_inv_freq_base": 10000.0,
       "n_layers": 24,
-      "local_window": 2048,
+      "local_window": 1024,
       "global_window": 64000,
-      "mem_freq": null,
+      "mem_freq": 32,
       "dtype": "bfloat16",
       "device": "cuda",
       "unet_design": false,
@@ -34,7 +40,6 @@
     },
     "device": "cuda",
     "do_compile": true,
-    "run_name": "window_147M_2048_b64k_s30k",
     "log_per_steps": 50,
     "disable_progress_bar": false,
     "num_dataloader_workers": 4

@@ -1,0 +1,5 @@
+{
+  "vocab_size": 128,
+  "unk_token": 0,
+  "eos_token": 127
+}

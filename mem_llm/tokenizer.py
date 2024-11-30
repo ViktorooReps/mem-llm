@@ -13,13 +13,13 @@ class Tokenizer(Configurable, metaclass=ABCMeta):
     def descriptor(self):
         return self.TYPE + '-' + '-'.join(f'{k}{v}' for k, v in self.to_config().items())
 
-    @abstractmethod
     @property
+    @abstractmethod
     def size(self) -> int:
         pass
 
-    @abstractmethod
     @property
+    @abstractmethod
     def eos_token(self) -> int:
         pass
 
