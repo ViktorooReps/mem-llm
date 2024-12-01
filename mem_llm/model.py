@@ -55,7 +55,7 @@ def serialize_dtype(dtype: str | torch.dtype) -> str:
 
 
 def norm(x):
-    return F.rms_norm(x, (x.size(-1),))
+    return F.rms_norm(x, (x.size(-1),), eps=1e-5)
 
 
 class CastedLinear(nn.Linear):
@@ -116,7 +116,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = self.hid_proj(x)
-        x = F.relu(x).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU;
+        x = F.silu(x)
         x = self.out_proj(x)
         return x
 
@@ -715,7 +715,7 @@ class MemLLM(Generator, Configurable):
 
         embeds = None
         if self.embeds_residual:
-            embeds = x
+            embeds = torch.clone(x)
 
         # Store outputs for U-Net-style skip connections
         # If there is no need to store them, just ignore any actions with the list with Noop

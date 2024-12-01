@@ -59,6 +59,7 @@ class TrainingConfig(Configurable):
     adamw_beta1: float = 0.9
     adamw_beta2: float = 0.95
     adamw_wd: float = 0.01
+    max_grad_norm: float = 1.0
 
     # model
     dataset_config: dict = field(default_factory=lambda: {'dataset_name': 'fineweb-edu'})
@@ -338,6 +339,8 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
             lr=config.adamw_learning_rate,
             betas=(config.adamw_beta1, config.adamw_beta2),
             weight_decay=config.adamw_wd,
+            eps=1e-8,
+            fused=True
         )
 
     scheduler = LambdaLR(
@@ -571,7 +574,7 @@ def train(context: TrainingContext):
 
         # the windows can warm up over time
         context.model.set_local_window(update_local_window(context.step))
-        context.model.set_local_window(update_global_window(context.step))
+        context.model.set_global_window(update_global_window(context.step))
 
         def closure():
             context.optimizer.zero_grad()
@@ -580,6 +583,12 @@ def train(context: TrainingContext):
             loss = F.cross_entropy(outputs.logits.view(seq_length, -1), target.view(seq_length))
 
             loss.backward()
+
+            max_grad_norm = context.config.max_grad_norm 
+            if isinstance(context.model, torch.distributed.fsdp.FullyShardedDataParallel):
+                torch.distributed.fsdp.FullyShardedDataParallel.clip_grad_norm_(context.model, max_grad_norm)
+            else:
+                torch.nn.utils.clip_grad_norm_(context.model.parameters(), max_grad_norm)
 
             return loss.item()
 
