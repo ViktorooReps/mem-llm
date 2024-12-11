@@ -27,10 +27,11 @@
     "dtype": "bfloat16",
     "unet_design": true,
     "embeds_residual": false,
-    "do_compile": true
+    "do_compile": true,
+    "logit_soft_cap": 30.0
   },
   "do_compile": true,
-  "tokenizer_type": "char",
+  "tokenizer_type": "tiktoken",
   "tokenizer_config": {},
   "log_per_steps": 50,
   "num_dataloader_workers": 4,

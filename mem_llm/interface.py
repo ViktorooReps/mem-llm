@@ -11,7 +11,7 @@ from torch import nn
 _T = TypeVar('_T')
 
 
-class Configurable(metaclass=abc.ABCMeta):
+class ConfigurableMixin(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def to_config(self):
         pass
@@ -39,6 +39,16 @@ class Configurable(metaclass=abc.ABCMeta):
             config = json.load(f)
 
         return cls.from_config(config, **extra_kwargs)
+
+
+class WindowedMixin(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def set_local_window(self, local_window: int):
+        pass
+
+    @abc.abstractmethod
+    def set_global_window(self, global_window: int):
+        pass
 
 
 @dataclass

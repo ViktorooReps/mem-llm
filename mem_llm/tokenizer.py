@@ -3,10 +3,10 @@ from abc import ABCMeta, abstractmethod
 import tiktoken
 import torch
 
-from mem_llm.interface import Configurable
+from mem_llm.interface import ConfigurableMixin
 
 
-class Tokenizer(Configurable, metaclass=ABCMeta):
+class Tokenizer(ConfigurableMixin, metaclass=ABCMeta):
     TYPE = None
 
     @property

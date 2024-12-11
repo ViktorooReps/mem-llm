@@ -20,7 +20,7 @@ from tqdm import tqdm
 from mem_llm.custom_logging import logger
 from mem_llm.custom_tqdm import abbreviate_number
 from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteDataLoaderWrapper
-from mem_llm.interface import Configurable, ModelOutput
+from mem_llm.interface import ConfigurableMixin, ModelOutput
 from mem_llm.model import MemLLM
 from mem_llm.tokenizer import TOKENIZERS
 
@@ -36,7 +36,7 @@ TRAINING_STATE_FILE = 'training_state.pt'
 
 
 @dataclass
-class TrainingConfig(Configurable):
+class TrainingConfig(ConfigurableMixin):
     # training length
     training_steps: int = 100_000
     cooldown_steps: int | float = 0.2
@@ -130,7 +130,7 @@ class TrainingConfig(Configurable):
         assert self.training_steps >= self.warmup_steps + self.cooldown_steps
 
 
-class MetricsLogger(Configurable):
+class MetricsLogger(ConfigurableMixin):
     def __init__(self, log_file: str | Path, column_names: list[str], *, rewrite: bool = True):
         self.log_file = Path(log_file)
         self.log_file.parent.mkdir(exist_ok=True, parents=True)
