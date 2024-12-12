@@ -120,7 +120,7 @@ def get_document_info(eos_mask: torch.Tensor) -> (torch.Tensor, torch.Tensor):
     return doc_ids_per_token, document_positions
 
 
-target_n_mem_padded = None
+target_n_mem_padded = 1  # None
 
 
 def create_mem_block_masks(

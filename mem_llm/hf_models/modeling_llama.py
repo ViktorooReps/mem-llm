@@ -823,6 +823,8 @@ class LlamaMemDecoderLayer(nn.Module):
         Runs a transformer block on x wrt to precomputed KV. If block_mask is not None, runs a
         sparse attention implementation (FlexAttention), otherwise SDPA will be used.
 
+        IMPORTANT: keys should already be with position information encoded!
+
         NOTE: SDPA can only be used when Q=1
         """
         batch_size, n, _ = x.shape
