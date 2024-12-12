@@ -66,7 +66,7 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 def download_llama(model_name: str, models_dir: Path | str = 'models'):
     from transformers.models.llama import LlamaForCausalLM as HfLlama
 
-    HfLlama.from_pretrained(model_name).save_pretrained(models_dir / model_name)
+    HfLlama.from_pretrained(model_name).save_pretrained(Path(models_dir) / model_name)
 
 
 def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
