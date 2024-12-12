@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, TypedDict
 
@@ -72,17 +73,42 @@ def download_llama(model_name: str, models_dir: Path | str = 'models'):
 
 
 def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
-    state_dict = safetensors.torch.load_file(Path(checkpoint) / 'model.safetensors')
+    checkpoint = Path(checkpoint)
+    dest = Path(dest)
 
-    # FIXME: this is super inefficient, may OOM on larger models
+    # copy the checkpoint
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in checkpoint.iterdir():
+        if item.is_file():
+            shutil.copy(item, dest / item.name)
+
+    # convert the state dict
+    state_dict_path = checkpoint / 'model.safetensors'
+    if not state_dict_path.exists():
+        raise FileNotFoundError(f"State dict file 'model.safetensors' not found in {checkpoint}")
+
+    state_dict = safetensors.torch.load_file(state_dict_path)
+
     state_dict_converted = {
         k.replace('.self_attn', ''): v
         for k, v in state_dict.items()
     }
 
-    dest = Path(dest)
-    dest.mkdir(exist_ok=True, parents=True)
-    safetensors.torch.save_file(state_dict_converted, dest)
+    safetensors.torch.save_file(state_dict_converted, dest / 'model.safetensors')
+
+    # convert the config
+    config_path = checkpoint / 'config.json'
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file 'config.json' not found in {checkpoint}")
+
+    config = LlamaConfig.from_pretrained(checkpoint)
+    config.precompute_mem = False
+    config.attn_implementation = 'flex_attention'
+    config.mem_init = 'bos'
+    config.mem_freq = 1000000000
+    config.use_cache = False
+
+    config.save_pretrained(dest)
 
 
 class LlamaRMSNorm(nn.Module):
