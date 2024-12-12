@@ -717,17 +717,17 @@ class LlamaMemDecoderLayer(nn.Module):
 
         # wrap in self_attn for checkpoint compatibility with HF Llamas
         self.self_attn = nn.ModuleDict({
-            'q_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=self.attention_bias),
-            'k_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=self.attention_bias),
-            'v_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=self.attention_bias),
-            'o_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=self.attention_bias),
+            'q_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=config.attention_bias),
+            'k_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=config.attention_bias),
+            'v_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=config.attention_bias),
+            'o_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=config.attention_bias),
             # we need additional projections back to the current layer KV space
             # otherwise, the key-values will be of the next layer space
             'k_mem_proj': nn.Linear(
-                self.hidden_dims, self.kv_dims, bias=self.attention_bias
+                self.hidden_dims, self.kv_dims, bias=config.attention_bias
             ) if self.precompute_mem else None,
             'v_mem_proj': nn.Linear(
-                self.hidden_dims, self.kv_dims, bias=self.attention_bias
+                self.hidden_dims, self.kv_dims, bias=config.attention_bias
             ) if self.precompute_mem else None,
         })
 
