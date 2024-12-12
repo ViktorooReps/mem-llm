@@ -1160,7 +1160,6 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                 do_compile=True,
                 pad_memory=False
             )
-            position_ids[:, 1:] += 1  # TODO: remove this
             mem_kwargs = {
                 'block_mask': block_mask,
                 'mem_block_mask': mem_block_mask,
