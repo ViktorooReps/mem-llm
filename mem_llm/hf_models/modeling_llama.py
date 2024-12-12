@@ -754,8 +754,6 @@ class LlamaMemDecoderLayer(nn.Module):
         block_mask = kwargs.get('block_mask', None)
         mem_block_mask = kwargs.get('mem_block_mask', None)
 
-        residual = hidden_states
-
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
@@ -802,14 +800,6 @@ class LlamaMemDecoderLayer(nn.Module):
             assert hidden_states_mem is not None
             hidden_states = torch.concat([hidden_states_mem, hidden_states], dim=1)
 
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
         outputs = (hidden_states,)
 
         if output_attentions:
@@ -841,6 +831,7 @@ class LlamaMemDecoderLayer(nn.Module):
         q = apply_rotary_individual(q, cos, sin, unsqueeze_dim=2)
 
         if block_mask is None:
+            # this option is used when inferencing with cache that eliminates useless states
             assert n == 1
 
             # run dense attention
@@ -1183,6 +1174,8 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
             )
 
         # <- MEM LLM changes
+
+        print(position_ids)
 
         hidden_states = inputs_embeds
 
