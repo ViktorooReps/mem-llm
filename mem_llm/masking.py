@@ -120,7 +120,7 @@ def get_document_info(eos_mask: torch.Tensor) -> (torch.Tensor, torch.Tensor):
     return doc_ids_per_token, document_positions
 
 
-target_n_mem_padded = 1  # None
+target_n_mem_padded = None
 
 
 def create_mem_block_masks(
@@ -132,6 +132,7 @@ def create_mem_block_masks(
         global_window: int | None = None,
         separate_mem_and_main_update: bool = False,
         do_compile: bool = True,
+        pad_memory: bool = False,
 ) -> (BlockMask, BlockMask | None, int, torch.Tensor):
 
     with_batch_dim = False
@@ -168,7 +169,7 @@ def create_mem_block_masks(
     #  so we pad here up to block size to hopefully avoid different shapes during training. But this will not work
     #  on every input, I've only tested it on FineWeb-Edu, where examples are fairly long.
     global target_n_mem_padded
-    if mem_freq is None:
+    if mem_freq is None or not pad_memory:
         target_n_mem_padded = 0
 
     if target_n_mem_padded is None:
