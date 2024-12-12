@@ -101,12 +101,14 @@ def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
     if not config_path.exists():
         raise FileNotFoundError(f"Config file 'config.json' not found in {checkpoint}")
 
-    config = LlamaConfig.from_pretrained(checkpoint)
-    config.precompute_mem = False
-    config.attn_implementation = 'flex_attention'
-    config.mem_init = 'bos'
-    config.mem_freq = 1000000000
-    config.use_cache = False
+    config = LlamaConfig.from_pretrained(
+        checkpoint,
+        precompute_mem=False,
+        attn_implementation='flex_attention',
+        mem_init='bos',
+        mem_freq=1000000000,
+        use_cache=False
+    )
 
     config.save_pretrained(dest)
 
