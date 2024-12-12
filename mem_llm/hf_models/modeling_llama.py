@@ -58,6 +58,11 @@ from .configuration_llama import LlamaConfig
 from ..interface import ConfigurableMixin, WindowedMixin
 from ..masking import create_mem_block_masks
 
+
+# see https://github.com/pytorch/pytorch/issues/142817
+flex_attention = torch.compile(flex_attention, fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
+
+
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
@@ -754,6 +759,9 @@ class LlamaMemDecoderLayer(nn.Module):
         block_mask = kwargs.get('block_mask', None)
         mem_block_mask = kwargs.get('mem_block_mask', None)
 
+        # in llama, residual is taken before normalization
+        residual = hidden_states
+
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
@@ -768,10 +776,16 @@ class LlamaMemDecoderLayer(nn.Module):
         if self.precompute_mem and n_mem > 0:
             # prerun the block on the memory
             hidden_states_mem = hidden_states[:, :n_mem]
+            residual_mem = residual[:, :n_mem]
             cos_mem = cos[:, :n_mem]
             sin_mem = sin[:, :n_mem]
 
-            hidden_states_mem = self._run_block(hidden_states_mem, cos_mem, sin_mem, k, v, block_mask=mem_block_mask)
+            hidden_states_mem = self._run_block(
+                hidden_states_mem, residual_mem,
+                cos_mem, sin_mem,
+                k, v,
+                block_mask=mem_block_mask
+            )
 
             # update KV with precomputed mem
             k_mem = self.self_attn.k_mem_proj(hidden_states_mem).view(
@@ -791,10 +805,16 @@ class LlamaMemDecoderLayer(nn.Module):
 
             # process the rest of the inputs normally
             hidden_states = hidden_states[:, n_mem:]
+            residual = residual[:, n_mem:]
             cos = cos[:, n_mem:]
             sin = sin[:, n_mem:]
 
-        hidden_states = self._run_block(hidden_states, cos, sin, k, v, block_mask=block_mask)
+        hidden_states = self._run_block(
+            hidden_states, residual,
+            cos, sin,
+            k, v,
+            block_mask=block_mask
+        )
 
         if self.precompute_mem and n_mem > 0:
             assert hidden_states_mem is not None
@@ -813,6 +833,7 @@ class LlamaMemDecoderLayer(nn.Module):
     def _run_block(
             self,
             x: torch.Tensor,  # (B, Q, H)
+            residual: torch.Tensor,  # (B, Q, H)
             cos: torch.Tensor,
             sin: torch.Tensor,
             k: torch.Tensor,  # (B, KV, kvh, h) - precomputed k (possibly cached)
@@ -855,8 +876,9 @@ class LlamaMemDecoderLayer(nn.Module):
             ).transpose(1, 2).contiguous().view(batch_size, n, self.hidden_dims)
 
         # residual connection over attention block and over MLP
-        x = x + self.self_attn.o_proj(attn)
-        x = x + self.mlp(self.post_attention_layernorm(x))
+        x = residual + self.self_attn.o_proj(attn)
+        residual = x  # avoid normalization of the residual connection
+        x = residual + self.mlp(self.post_attention_layernorm(x))
 
         return x
 
