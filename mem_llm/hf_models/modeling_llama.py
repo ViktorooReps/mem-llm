@@ -65,10 +65,10 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 
 def download_llama(model_name: str, models_dir: Path | str = 'models'):
     from transformers.models.llama import LlamaForCausalLM as HfLlama
-    from transformers.models.llama import LlamaTokenizer as HfLlamaTokenizer
+    from transformers import AutoTokenizer
 
     HfLlama.from_pretrained(model_name).save_pretrained(Path(models_dir) / model_name)
-    HfLlamaTokenizer.from_pretrained(model_name).save_pretrained(Path(models_dir) / model_name)
+    AutoTokenizer.from_pretrained(model_name).save_pretrained(Path(models_dir) / model_name)
 
 
 def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
