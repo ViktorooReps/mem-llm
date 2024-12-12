@@ -179,15 +179,13 @@ def create_mem_block_masks(
     else:
         mem_pad = target_n_mem_padded - n_mem
 
-    full_positions = torch.concat([
-        mem_pos, mem_pos.new_zeros(mem_pad), document_positions
-    ], dim=0)
-    full_doc_ids = torch.concat([
-        mem_doc_ids, mem_doc_ids.new_zeros(mem_pad), doc_ids_per_token
-    ], dim=0).contiguous()
-    full_eos_mask = torch.concat([
-        eos_mask.new_zeros(n_mem), eos_mask.new_zeros(mem_pad), eos_mask
-    ], dim=0).contiguous()
+    if mem_pad:
+        mem_pos = torch.concat([mem_pos, mem_pos.new_zeros(mem_pad)])
+        mem_doc_ids = torch.concat([mem_doc_ids, mem_doc_ids.new_zeros(mem_pad)])
+
+    full_positions = torch.concat([mem_pos, document_positions], dim=0).contiguous()
+    full_doc_ids = torch.concat([mem_doc_ids, doc_ids_per_token], dim=0).contiguous()
+    full_eos_mask = torch.concat([eos_mask.new_zeros(n_mem + mem_pad), eos_mask], dim=0).contiguous()
 
     def base_document_mask(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
         # attend only within the same document and do not attend to and from <eos> tokens
