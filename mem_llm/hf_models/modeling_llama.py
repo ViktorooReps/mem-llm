@@ -130,7 +130,7 @@ def _flex_attention(
 
         attn_out = attn_out.view(batch_size, n_groups, new_group_size, q_len, head_dims)
         attn_out = attn_out[:, :, :-extra_heads_per_group, :, :]
-        attn_out = attn_out.view(batch_size, n_q_heads, q_len, head_dims)
+        attn_out = attn_out.reshape(batch_size, n_q_heads, q_len, head_dims)
 
         return attn_out if not return_lse else (attn_out, result[1])
 
