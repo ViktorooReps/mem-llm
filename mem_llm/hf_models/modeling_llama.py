@@ -18,8 +18,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+from pathlib import Path
 from typing import List, Optional, Tuple, Union, TypedDict
 
+import safetensors.torch
 import torch
 import torch.utils.checkpoint
 from torch import nn
@@ -59,6 +61,23 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
 _CONFIG_FOR_DOC = "LlamaConfig"
+
+
+def download_llama(model_name: str, models_dir: Path | str = 'models'):
+    from transformers.models.llama import LlamaForCausalLM as HfLlama
+
+    HfLlama.from_pretrained(model_name).save_pretrained(models_dir / model_name)
+
+
+def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
+    state_dict = safetensors.torch.load_file(Path(checkpoint) / 'model.safetensors')
+
+    state_dict_converted = {
+        k.replace('.self_attn', ''): v
+        for k, v in state_dict.items()
+    }
+
+    safetensors.torch.save_file(state_dict_converted, dest)
 
 
 class LlamaRMSNorm(nn.Module):
