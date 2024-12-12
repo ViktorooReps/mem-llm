@@ -83,7 +83,7 @@ def _next_power_of_two(n: int) -> int:
 
 # TODO: remove this once https://github.com/pytorch/pytorch/issues/143117 is resolved
 # compilation args taken from https://github.com/pytorch/pytorch/issues/142817
-@torch.compile(fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")  # compilation args taken from
+@torch.compile(fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
 def _flex_attention(
     query: Tensor,  # (B, Hq, L, E)
     key: Tensor,    # (B, Hkv, S, E)
@@ -134,7 +134,7 @@ def _flex_attention(
 
         return attn_out if not return_lse else (attn_out, result[1])
 
-    # If no padding is needed, just run flex_attention directly
+    # if no padding is needed, just run flex_attention directly
     return flex_attention(
         query, key, value,
         score_mod=score_mod,
@@ -1283,8 +1283,6 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
             )
 
         # <- MEM LLM changes
-
-        print(position_ids)
 
         hidden_states = inputs_embeds
 
