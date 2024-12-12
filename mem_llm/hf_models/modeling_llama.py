@@ -930,7 +930,7 @@ class LlamaMemDecoderLayer(nn.Module):
             ).transpose(1, 2).contiguous().view(batch_size, n, self.hidden_dims)
 
         # residual connection over attention block and over MLP
-        x = x + self.out_proj(attn)
+        x = x + self.o_proj(attn)
         x = x + self.mlp(self.post_attention_layernorm(x))
 
         return x
