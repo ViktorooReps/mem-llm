@@ -94,7 +94,7 @@ def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
         for k, v in state_dict.items()
     }
 
-    safetensors.torch.save_file(state_dict_converted, dest / 'model.safetensors')
+    safetensors.torch.save_file(state_dict_converted, dest / 'model.safetensors', metadata={'format': 'pt'})
 
     # convert the config
     config_path = checkpoint / 'config.json'
