@@ -174,31 +174,6 @@ class LlamaRotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
-    """LlamaRotaryEmbedding extended with linear scaling. Credits to the Reddit user /u/kaiokendev"""
-
-    def __init__(self, *args, **kwargs):
-        logger.warning_once(
-            "`LlamaLinearScalingRotaryEmbedding` is deprecated an will be removed in v4.46. Please use "
-            "`LlamaRotaryEmbedding`, which now also does linear scaling (simply pass the model config to __init__)."
-        )
-        kwargs["rope_type"] = "linear"
-        super().__init__(*args, **kwargs)
-
-
-class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
-    """LlamaRotaryEmbedding extended with Dynamic NTK scaling. Credits to the Reddit users /u/bloc97 and /u/emozilla"""
-
-    def __init__(self, *args, **kwargs):
-        logger.warning_once(
-            "`LlamaDynamicNTKScalingRotaryEmbedding` is deprecated an will be removed in v4.46. Please use "
-            "`LlamaRotaryEmbedding`, which now also does dynamic ntk scaling (simply pass the model config to "
-            "__init__)."
-        )
-        kwargs["rope_type"] = "dynamic"
-        super().__init__(*args, **kwargs)
-
-
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -771,7 +746,7 @@ class LlamaMemDecoderLayer(nn.Module):
         assert attention_mask is None
         assert position_embeddings is not None  # removed BC, so always expect PE
 
-        # cache is not implemented for now
+        # FIXME: cache is not implemented for now
         assert past_key_value is None
 
         batch_size, seq_length, hidden_dims = hidden_states.size()
@@ -1036,6 +1011,9 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
         self.eos_token_id = config.eos_token_id
         assert self.eos_token_id is not None
 
+        self.bos_token_id = config.bos_token_id
+        assert self.bos_token_id is not None
+
         self.mem_freq = config.mem_freq
         self.local_window = config.local_window
         self.global_window = config.global_window
@@ -1136,6 +1114,10 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                 "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
             )
             use_cache = False
+
+        if (input_ids[:, 0] == self.bos_token_id).all() and self.is_mem:
+            # no need for the token at the start as we have a memory at the start to serve as sink
+            input_ids = input_ids[:, 1:]
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
