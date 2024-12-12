@@ -784,8 +784,8 @@ class LlamaMemDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        k = self.k_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dims)
-        v = self.v_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dims)
+        k = self.self_attn.k_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dims)
+        v = self.self_attn.v_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dims)
 
         cos, sin = position_embeddings
 
@@ -801,8 +801,12 @@ class LlamaMemDecoderLayer(nn.Module):
             hidden_states_mem = self._run_block(hidden_states_mem, cos_mem, sin_mem, k, v, block_mask=mem_block_mask)
 
             # update KV with precomputed mem
-            k_mem = self.k_mem_proj(hidden_states_mem).view(batch_size, n_mem, self.n_kv_heads, self.head_dims)
-            v_mem = self.v_mem_proj(hidden_states_mem).view(batch_size, n_mem, self.n_kv_heads, self.head_dims)
+            k_mem = self.self_attn.k_mem_proj(hidden_states_mem).view(
+                batch_size, n_mem, self.n_kv_heads, self.head_dims
+            )
+            v_mem = self.self_attn.v_mem_proj(hidden_states_mem).view(
+                batch_size, n_mem, self.n_kv_heads, self.head_dims
+            )
 
             k_mem = apply_rotary_individual(k_mem, cos_mem, sin_mem, unsqueeze_dim=2)
 
@@ -858,7 +862,7 @@ class LlamaMemDecoderLayer(nn.Module):
         """
         batch_size, n, _ = x.shape
 
-        q = self.q_proj(x).view(batch_size, n, self.n_q_heads, self.head_dims)
+        q = self.self_attn.q_proj(x).view(batch_size, n, self.n_q_heads, self.head_dims)
         q = apply_rotary_individual(q, cos, sin, unsqueeze_dim=2)
 
         if block_mask is None:
@@ -883,7 +887,7 @@ class LlamaMemDecoderLayer(nn.Module):
             ).transpose(1, 2).contiguous().view(batch_size, n, self.hidden_dims)
 
         # residual connection over attention block and over MLP
-        x = x + self.o_proj(attn)
+        x = x + self.self_attn.o_proj(attn)
         x = x + self.mlp(self.post_attention_layernorm(x))
 
         return x
