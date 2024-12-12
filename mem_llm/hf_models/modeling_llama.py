@@ -64,55 +64,6 @@ _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
-def download_llama(model_name: str, models_dir: Path | str = 'models'):
-    from transformers.models.llama import LlamaForCausalLM as HfLlama
-    from transformers import AutoTokenizer
-
-    HfLlama.from_pretrained(model_name).save_pretrained(Path(models_dir) / model_name)
-    AutoTokenizer.from_pretrained(model_name).save_pretrained(Path(models_dir) / model_name)
-
-
-def convert_llama_checkpoint(checkpoint: str | Path, dest: str | Path):
-    checkpoint = Path(checkpoint)
-    dest = Path(dest)
-
-    # copy the checkpoint
-    dest.mkdir(parents=True, exist_ok=True)
-    for item in checkpoint.iterdir():
-        if item.is_file():
-            shutil.copy(item, dest / item.name)
-
-    # convert the state dict
-    state_dict_path = checkpoint / 'model.safetensors'
-    if not state_dict_path.exists():
-        raise FileNotFoundError(f"State dict file 'model.safetensors' not found in {checkpoint}")
-
-    state_dict = safetensors.torch.load_file(state_dict_path)
-
-    state_dict_converted = {
-        k.replace('.self_attn', ''): v
-        for k, v in state_dict.items()
-    }
-
-    safetensors.torch.save_file(state_dict_converted, dest / 'model.safetensors', metadata={'format': 'pt'})
-
-    # convert the config
-    config_path = checkpoint / 'config.json'
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file 'config.json' not found in {checkpoint}")
-
-    config = LlamaConfig.from_pretrained(
-        checkpoint,
-        precompute_mem=False,
-        attn_implementation='flex_attention',
-        mem_init='bos',
-        mem_freq=1000000000,
-        use_cache=False
-    )
-
-    config.save_pretrained(dest)
-
-
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
@@ -764,19 +715,21 @@ class LlamaMemDecoderLayer(nn.Module):
         self.gqa_enabled = (self.n_q_heads != self.n_kv_heads)
         self.precompute_mem = config.precompute_mem
 
-        self.q_proj = nn.Linear(self.hidden_size, self.hidden_dims, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.kv_dims, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.kv_dims, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.hidden_dims, self.hidden_size, bias=config.attention_bias)
-
-        if self.precompute_mem:
-            self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim,
-                                    bias=config.attention_bias)
-            self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim,
-                                    bias=config.attention_bias)
-        else:
-            self.k_mem_proj = None
-            self.v_mem_proj = None
+        # wrap in self_attn for checkpoint compatibility with HF Llamas
+        self.self_attn = nn.ModuleDict({
+            'q_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=self.attention_bias),
+            'k_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=self.attention_bias),
+            'v_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=self.attention_bias),
+            'o_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=self.attention_bias),
+            # we need additional projections back to the current layer KV space
+            # otherwise, the key-values will be of the next layer space
+            'k_mem_proj': nn.Linear(
+                self.hidden_dims, self.kv_dims, bias=self.attention_bias
+            ) if self.precompute_mem else None,
+            'v_mem_proj': nn.Linear(
+                self.hidden_dims, self.kv_dims, bias=self.attention_bias
+            ) if self.precompute_mem else None,
+        })
 
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
