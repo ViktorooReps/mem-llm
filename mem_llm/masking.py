@@ -170,7 +170,7 @@ def create_mem_block_masks(
     #  on every input, I've only tested it on FineWeb-Edu, where examples are fairly long.
     global target_n_mem_padded
     if mem_freq is None or not pad_memory:
-        target_n_mem_padded = 0
+        target_n_mem_padded = n_mem
 
     if target_n_mem_padded is None:
         mem_pad = 128 - n_mem % 128
