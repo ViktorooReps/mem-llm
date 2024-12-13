@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import os.path
+import shutil
 import time
 from dataclasses import dataclass, field
 from functools import partial
@@ -22,7 +23,8 @@ from mem_llm.custom_tqdm import abbreviate_number
 from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteDataLoaderWrapper
 from mem_llm.interface import ConfigurableMixin, ModelOutput
 from mem_llm.model import MemLLM
-from mem_llm.tokenizer import TOKENIZERS
+from mem_llm import TOKENIZERS, MODELS
+from mem_llm.tokenizer import Tokenizer
 
 RUNS_DIR = 'runs'
 CPTS_DIR = 'checkpoints'
@@ -62,14 +64,15 @@ class TrainingConfig(ConfigurableMixin):
     max_grad_norm: float = 1.0
 
     # model
+    model_type: str = 'hf_llama'
     dataset_config: dict = field(default_factory=lambda: {'dataset_name': 'fineweb-edu'})
     model_config: dict = field(default_factory=dict)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     do_compile: bool = True
 
     # tokenizer
-    tokenizer_type: str = 'tiktoken'
-    tokenizer_config: dict = field(default_factory=lambda: {'name': 'gpt2'})
+    tokenizer_type: str = 'hf'
+    tokenizer_config: dict = field(default_factory=lambda: {'name': 'HuggingFaceTB/SmolLM2-135M-Instruct'})
 
     # logging
     run_name: str = None  # set automatically when run from CLI
@@ -83,7 +86,7 @@ class TrainingConfig(ConfigurableMixin):
     num_dataloader_workers: int = 4
     dataloader_prefetch_factor: int = 8
 
-    # window warmup
+    # windows warmup
     start_local_window_size: int = None  # if None, inferred from the model
     end_local_window_size: int = None  # if None, inferred from the model
     local_window_warmup_steps: int | float = 0
@@ -91,6 +94,10 @@ class TrainingConfig(ConfigurableMixin):
     end_global_window_size: int = None  # if None, inferred from the model
     global_window_warmup_steps: int | float = 0
 
+    # mem freq warmup
+    start_mem_freq: int = None
+    end_mem_freq: int = None
+    mem_freq_warmup_steps: int | float = 0
 
     @classmethod
     def for_run(cls, run_name: str) -> 'TrainingConfig':
@@ -125,6 +132,9 @@ class TrainingConfig(ConfigurableMixin):
 
         if isinstance(self.global_window_warmup_steps, float):
             self.global_window_warmup_steps = int(self.global_window_warmup_steps * self.training_steps)
+
+        if isinstance(self.mem_freq_warmup_steps, float):
+            self.mem_freq_warmup_steps = int(self.mem_freq_warmup_steps * self.training_steps)
 
         assert self.eval_steps > 0
         assert self.training_steps >= self.warmup_steps + self.cooldown_steps
@@ -262,15 +272,23 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
 
     metrics_logger = MetricsLogger(config.metrics_file, column_names=[
         'step', 'seen_tokens', 'time_delta_s', 'run_name',
-        'local_window', 'global_window',
+        'local_window', 'global_window', 'mem_freq',
         'lr_mult', 'train_loss', 'val_loss',
     ], rewrite=config.rewrite_metrics)
 
-    tokenizer = TOKENIZERS[config.tokenizer_type].from_config(config.tokenizer_config)
+    tokenizer_class: Type[Tokenizer] = TOKENIZERS[config.tokenizer_type]
+    if pretrained_model_path is None:
+        tokenizer = tokenizer_class.from_config(config.tokenizer_config)
+    else:
+        tokenizer = tokenizer_class.load(pretrained_model_path)
 
     dataset_name = config.dataset_config['dataset_name']
     dataset_config = DATASET_CONFIGS[dataset_name](**config.dataset_config)
     train_data, eval_data = load_dataset(dataset_config, tokenizer)
+
+    # we won't need the tokenizer anymore, so we save it to model dir to be able to load on inference
+    save_path = Path(config.run_dir) / MODEL_DIR
+    tokenizer.save(save_path)
 
     # we set batch_size to None because the batch size is dictated by the example length
     train_dataloader = InfiniteDataLoaderWrapper(DataLoader(
@@ -285,35 +303,51 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
     ))
 
     model_extras = {
-        'device': config.device,
         # synchronise the model with tokenizer
         'vocab_size': len(tokenizer),
-        'eos_token': tokenizer.eos_token,
+        'eos_token_id': tokenizer.eos_token_id,
     }
 
+    model_class = MODELS[config.model_type]
     if pretrained_model_path is not None:
-        model = MemLLM.load(pretrained_model_path, **model_extras)
+        model = model_class.load(pretrained_model_path, **model_extras)
     else:
-        model = MemLLM.from_config(config.model_config, **model_extras)
+        model = model_class.from_config(config.model_config, **model_extras)
+
+    model = model.to(config.device)
 
     model_global_window = model.global_window
     model_local_window = model.local_window
+    model_mem_freq = model.mem_freq
 
-    # determine values for windows warmup
+    # determine values for warmups
+
     if config.local_window_warmup_steps == 0:
         config.start_local_window_size = model_local_window
         config.end_local_window_size = model_local_window
+
+    if config.global_window_warmup_steps == 0:
         config.start_global_window_size = model_global_window
         config.end_global_window_size = model_global_window
+
+    if config.mem_freq_warmup_steps == 0:
+        config.start_mem_window_size = model_mem_freq
+        config.end_mem_window_size = model_mem_freq
 
     if config.start_local_window_size is None:
         config.start_local_window_size = model_local_window
     if config.end_local_window_size is None:
         config.end_local_window_size = model_local_window
+
     if config.start_global_window_size is None:
         config.start_global_window_size = model_global_window
     if config.end_global_window_size is None:
         config.end_global_window_size = model_global_window
+
+    if config.start_mem_window_size is None:
+        config.start_mem_window_size = model_mem_freq
+    if config.end_mem_window_size is None:
+        config.end_mem_window_size = model_mem_freq
 
     if config.use_muon:
         # Find ≥2D parameters in the body of the network -- these will be optimized by Muon
@@ -402,20 +436,17 @@ def save_checkpoint(context: TrainingContext, *, remove_others: bool = False) ->
         return save_to_checkpoint_dir
 
     # Delete all other checkpoints
-    for checkpoint in checkpoints_dir.glob('checkpoint_*'):
+    for checkpoint in list_checkpoints(context.config):
         if checkpoint != save_to_checkpoint_dir:
             try:
-                if checkpoint.is_dir():
-                    for sub_file in checkpoint.iterdir():
-                        sub_file.unlink()  # Delete files in the directory
-                    checkpoint.rmdir()  # Delete the directory itself
+                shutil.rmtree(checkpoint)
             except Exception as e:
                 logger.warning(f"Failed to delete checkpoint {checkpoint}: {e}")
 
     return save_to_checkpoint_dir
 
 
-def prepare_context(config: TrainingConfig) -> TrainingContext:
+def prepare_context(config: TrainingConfig, *, pretrained_model_path: str | Path | None = None) -> TrainingContext:
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -424,6 +455,7 @@ def prepare_context(config: TrainingConfig) -> TrainingContext:
 
     config_path = run_dir / CONFIG_FILE
     if config_path.exists():
+        # FIXME: this will not work for loading 2 different pretrained models
         old_config = TrainingConfig.load(config_path, run_name=config.run_name)
         if old_config != config:
             raise RuntimeError(f'Config at {config_path} does not match current config! '
@@ -432,7 +464,9 @@ def prepare_context(config: TrainingConfig) -> TrainingContext:
         # check if the experiment has already been completed
         model_path = run_dir / MODEL_DIR
         if model_path.exists() and model_path.is_dir() and len(list(model_path.iterdir())):
-            raise RuntimeError(f'The experiment at {run_dir} has already been finished! See trained model at {model_path}')
+            raise RuntimeError(
+                f'The experiment at {run_dir} has already been finished! See trained model at {model_path}'
+            )
 
         # try to load the last checkpoint
         checkpoints = list_checkpoints(config)
@@ -451,7 +485,7 @@ def prepare_context(config: TrainingConfig) -> TrainingContext:
         config.save(config_path)
 
     # fresh run
-    return new_context(config)
+    return new_context(config, pretrained_model_path=pretrained_model_path)
 
 
 @torch.no_grad()
@@ -505,19 +539,22 @@ def evaluate(context: TrainingContext):
         'val_loss': running_eval_loss_sum / config.eval_steps,
         'local_window': context.model.local_window,
         'global_window': context.model.global_window,
+        'mem_freq': context.model.mem_freq,
     })
 
 
-def compute_window_size(
+def compute_warmup_value(
         step: int,
-        start_size: int,
-        end_size: int,
+        start_value: int,
+        end_value: int,
         warmup_steps: int
 ) -> int:
     if warmup_steps > 0:
-        return int(start_size + (end_size - start_size) * min(step, warmup_steps) / warmup_steps)
+        progress = min(step, warmup_steps) / warmup_steps
+        full_delta = end_value - start_value
+        return int(start_value + full_delta * progress)
     else:
-        return start_size
+        return start_value
 
 
 def train(context: TrainingContext):
@@ -537,15 +574,21 @@ def train(context: TrainingContext):
         logger.warning(f'Continuing training from last checkpoint at {last_step} step')
 
     update_local_window = partial(
-        compute_window_size,
-        start_size=config.start_local_window_size, end_size=config.end_local_window_size,
+        compute_warmup_value,
+        start_value=config.start_local_window_size, end_value=config.end_local_window_size,
         warmup_steps=config.local_window_warmup_steps
     )
 
     update_global_window = partial(
-        compute_window_size,
-        start_size=config.start_global_window_size, end_size=config.end_global_window_size,
+        compute_warmup_value,
+        start_value=config.start_global_window_size, end_value=config.end_global_window_size,
         warmup_steps=config.global_window_warmup_steps
+    )
+
+    update_mem_freq = partial(
+        compute_warmup_value,
+        start_value=config.start_mem_freq, end_value=config.end_mem_freq,
+        warmup_steps=config.mem_freq_warmup_steps
     )
 
     # this is fine since our samplers are infinite
@@ -572,19 +615,22 @@ def train(context: TrainingContext):
 
         seq_length = len(example)
 
-        # the windows can warm up over time
+        # these values can warm up over time
         context.model.set_local_window(update_local_window(context.step))
         context.model.set_global_window(update_global_window(context.step))
+        context.model.set_mem_freq(update_mem_freq(context.step))
 
         def closure():
             context.optimizer.zero_grad()
 
             outputs: ModelOutput = context.model(example)  # noqa
-            loss = F.cross_entropy(outputs.logits.view(seq_length, -1), target.view(seq_length))
+
+            # compute loss in full precision
+            loss = F.cross_entropy(outputs.logits.view(seq_length, -1).float(), target.view(seq_length))
 
             loss.backward()
 
-            max_grad_norm = context.config.max_grad_norm 
+            max_grad_norm = context.config.max_grad_norm
             if isinstance(context.model, torch.distributed.fsdp.FullyShardedDataParallel):
                 torch.distributed.fsdp.FullyShardedDataParallel.clip_grad_norm_(context.model, max_grad_norm)
             else:
@@ -628,6 +674,7 @@ def train(context: TrainingContext):
                 'train_loss': running_train_loss,
                 'local_window': context.model.local_window,
                 'global_window': context.model.global_window,
+                'mem_freq': context.model.mem_freq,
             })
 
             last_log_time = time.time()
@@ -663,6 +710,13 @@ if __name__ == '__main__':
         help='Use specified config location instead of default.'
     )
 
+    parser.add_argument(
+        '--from_pretrained',
+        type=str,
+        default=None,
+        help='Point to saved checkpoint or a model on HF hub to use as base model'
+    )
+
     args = parser.parse_args()
     if len(args.cooldown_checkpoints):
         raise NotImplementedError()
@@ -676,5 +730,5 @@ if __name__ == '__main__':
         raise FileNotFoundError(f'Could not locate a config file at {cfg_path}')
 
     cfg = TrainingConfig.load(cfg_path, run_name=args.run_name)
-    ctx = prepare_context(cfg)
+    ctx = prepare_context(cfg, pretrained_model_path=args.from_pretrained)
     train(ctx)

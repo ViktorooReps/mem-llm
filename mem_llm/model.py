@@ -272,9 +272,6 @@ class MemTransformerBlock(nn.Module):
         return x
 
 
-# FIXME: remove padding once https://github.com/pytorch/pytorch/issues/139064 is resolved
-
-
 class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
     """
     Largely inspired by https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt2.py
@@ -299,11 +296,11 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
             precompute_mem: bool = False,
             logit_soft_cap: float | None = None,  # 30.0
             attention_score_soft_cap: float | None = None,
-            dtype: str | torch.dtype | None = torch.bfloat16,
+            torch_dtype: str | torch.dtype | None = torch.bfloat16,
             device: str | torch.device | None = 'cuda' if torch.cuda.is_available() else 'cpu',
             unet_design: bool = False,
             embeds_residual: bool = False,
-            eos_token: int = 127,
+            eos_token_id: int = 127,
             do_compile: bool = True,
     ):
         super(MemLLM, self).__init__()
@@ -328,11 +325,11 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
         self.precompute_mem = precompute_mem
         self.logit_soft_cap = logit_soft_cap
         self.attention_score_soft_cap = attention_score_soft_cap
-        self.dtype = deserialize_dtype(dtype)
+        self.dtype = deserialize_dtype(torch_dtype)
         self.device = torch.device(device)
         self.unet_design = unet_design
         self.embeds_residual = embeds_residual
-        self.eos_token = eos_token
+        self.eos_token = eos_token_id
         self.do_compile = do_compile
 
         self.hidden_dims = n_q_heads * head_dims
@@ -373,6 +370,9 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
     # These setters are used for attention window warmup (during training, we increase the window gradually)
     # You can also use them to manage inference speed and cache memory consumption.
 
+    def set_mem_freq(self, mem_freq: int):
+        self.mem_freq = mem_freq
+
     def set_local_window(self, local_window: int):
         self.local_window = local_window
 
@@ -396,7 +396,7 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
             'device': str(self.device),
             'unet_design': self.unet_design,
             'embeds_residual': self.embeds_residual,
-            'eos_token': self.eos_token,
+            'eos_token_id': self.eos_token,
             'do_compile': self.do_compile,
         }
 

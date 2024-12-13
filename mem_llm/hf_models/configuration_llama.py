@@ -192,6 +192,8 @@ class LlamaConfig(PretrainedConfig):
         self.num_attention_heads = num_attention_heads
 
         # specific to mem
+        if local_window is None:
+            local_window = max_position_embeddings
         self.local_window = local_window
         self.global_window = global_window
         self.precompute_mem = precompute_mem

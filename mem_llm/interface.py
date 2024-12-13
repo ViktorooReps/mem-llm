@@ -7,6 +7,7 @@ from typing import TypeVar, Type
 
 import torch
 from torch import nn
+from transformers.modeling_outputs import BaseModelOutputWithPast
 
 _T = TypeVar('_T')
 
@@ -24,7 +25,7 @@ class ConfigurableMixin(metaclass=abc.ABCMeta):
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
         config = self.to_config()
         with open(path, 'w') as f:
@@ -171,16 +172,11 @@ class Cache:  # FIXME: cache management is a bit complicated on non-batched tens
 
 
 @dataclass
-class ModelOutput:
+class ModelOutput(BaseModelOutputWithPast):
     # L: sequence length
     # V: size of the vocabulary
     # H: total hidden size of the model
-
-    # model predicts the next PA characters
-    logits: torch.Tensor  # (L, V)
-
-    # cache per layer
-    cache: Cache | None
+    logits: torch.Tensor = None  # (L, V)
 
 
 class Generator(nn.Module, metaclass=abc.ABCMeta):

@@ -19,6 +19,7 @@
 # limitations under the License.
 import math
 import shutil
+from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, TypedDict, Any, Dict
 
@@ -1164,16 +1165,34 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                 raise ValueError(f'Unknown mem_init {config.mem_init}, choose from `normal`, `bos`, `zeros`!')
         # <- MEM LLM changes
 
-    # MEM LLM changes ->
-
     def get_input_embeddings(self):
         return self.embed_tokens
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    # MEM LLM changes ->
+
+    @classmethod
+    def load(cls, path: str | Path, **extra_kwargs) -> 'LlamaModel':
+        return cls.from_pretrained(path, **extra_kwargs)
+
+    def save(self, path: str | Path) -> None:
+        self.save_pretrained(path)
+
     def to_config(self):
-        pass  # TODO
+        return self.config.to_dict()
+
+    @classmethod
+    def from_config(cls, config: dict, **extra_kwargs) -> 'LlamaModel':
+        config = deepcopy(config)
+        config.update(extra_kwargs)
+
+        config = LlamaConfig(**config)
+        return cls(config)
+
+    def set_mem_freq(self, mem_freq: int):
+        self.mem_freq = mem_freq
 
     def set_local_window(self, local_window: int):
         self.local_window = local_window
@@ -1214,9 +1233,19 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
             )
             use_cache = False
 
+        # MEM LLM changes ->
+        if len(input_ids.shape) < 2:
+            input_ids = input_ids.unsqueeze(0)
+
         if (input_ids[:, 0] == self.bos_token_id).all() and self.is_mem:
             # no need for the token at the start as we have a memory at the start to serve as sink
             input_ids = input_ids[:, 1:]
+
+        batch_size, seq_length = input_ids.shape
+
+        if batch_size > 1:
+            raise NotImplementedError()
+        # <- MEM LLM changes
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -1296,7 +1325,10 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                # MEM LLM changes ->
+                # remove added memory (if any was added)
+                all_hidden_states += (hidden_states[:, :-seq_length],)
+                # <- MEM LLM changes
 
             if self.gradient_checkpointing and self.training:
                 # TODO: this may be broken with mem
@@ -1332,6 +1364,11 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+        # MEM LLM changes ->
+        # remove added memory (if any was added)
+        hidden_states = hidden_states[:, :-seq_length]
+        # <- MEM LLM changes
 
         hidden_states = self.norm(hidden_states)
 
@@ -1477,11 +1514,11 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
+class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin, ConfigurableMixin, WindowedMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
 
-    def __init__(self, config):
+    def __init__(self, config: LlamaConfig):
         super().__init__(config)
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
@@ -1507,6 +1544,33 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
     def get_decoder(self):
         return self.model
+
+    # MEM LLM changes ->
+
+    def save(self, path: str | Path) -> None:
+        self.save_pretrained(path)
+
+    @classmethod
+    def from_config(cls, config: dict, **extra_kwargs) -> 'LlamaForCausalLM':
+        config = deepcopy(config)
+        config.update(extra_kwargs)
+
+        config = LlamaConfig(**config)
+        return cls(config)
+
+    def to_config(self):
+        return self.config.to_dict()
+
+    def set_mem_freq(self, mem_freq: int):
+        self.model.set_mem_freq(mem_freq)
+
+    def set_local_window(self, local_window: int):
+        self.model.set_local_window(local_window)
+
+    def set_global_window(self, global_window: int):
+        self.model.set_global_window(global_window)
+
+    # <- MEM LLM changes
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
@@ -1578,6 +1642,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
