@@ -7,13 +7,15 @@ pip3 install --pre torch torchvision torchaudio --index-url https://download.pyt
 
 python -c "
 from mem_llm.dataset import load_dataset, TSConfig, FineWebEduConfig
-from mem_llm.tokenizer import CharTokenizer, TikTokenTokenizer
+from mem_llm.tokenizer import CharTokenizer, TikTokenTokenizer, HfTokenizer
 
 arg1 = '$1'
 if arg1 == 'char':
     tokenizer = CharTokenizer.load('configs/char_tokenizer_config.json')
-elif arg1 == 'token':
+elif arg1 == 'tiktoken':
     tokenizer = TikTokenTokenizer.load('configs/gpt2_tokenizer_config.json')
+elif arg1 == 'hf':
+    tokenizer = HfTokenizer.load('HuggingFaceTB/SmolLM2-135M-Instruct')
 else:
     raise ValueError(f'Unknown tokenizer type: {arg1}')
 
