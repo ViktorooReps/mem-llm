@@ -180,7 +180,7 @@ def load_dataset_ts(config: TSConfig, tokenizer: Tokenizer) -> (GuaranteedLength
 
 @dataclass
 class FineWebEduConfig(DatasetConfig):
-    num_download_workers: int = 32
+    num_download_workers: int = 12
     train_length: int = 20_000_000_000  # 20B
     val_length: int = 10_000_000  # 10M
     dataset_name: str = 'fineweb-edu'
