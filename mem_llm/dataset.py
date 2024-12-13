@@ -202,7 +202,7 @@ def get_write_location(
 
 def tokenize_and_write(
         texts: list[str] | str,
-        tokenizer: CharTokenizer,
+        tokenizer: Tokenizer,
         arr: np.memmap,
         last_location: list[int],
         max_location: int,

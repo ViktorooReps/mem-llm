@@ -60,7 +60,7 @@ class Tokenizer(ConfigurableMixin, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def encode(self, text: str) -> torch.Tensor:
+    def encode(self, text: str, *, add_eos: bool = False) -> torch.Tensor:
         pass
 
     @abstractmethod
