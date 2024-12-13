@@ -179,7 +179,7 @@ class HfTokenizer(Tokenizer):
         return self.tokenizer.eos_token_id
 
     def encode(self, text: str) -> torch.Tensor:
-        return self.tokenizer.encode(text, return_tensors='pt').input_ids
+        return self.tokenizer.encode(text, return_tensors='pt')
 
     def decode(self, tensor: torch.Tensor) -> torch.Tensor:
         return self.tokenizer.decode(tensor)
