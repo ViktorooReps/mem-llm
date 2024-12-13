@@ -178,8 +178,11 @@ class HfTokenizer(Tokenizer):
     def eos_token_id(self) -> int:
         return self.tokenizer.eos_token_id
 
-    def encode(self, text: str) -> torch.Tensor:
-        return self.tokenizer.encode(text, return_tensors='pt')[0]
+    def encode(self, text: str, *, add_eos: bool = False) -> torch.Tensor:
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+        if add_eos:
+            tokens.append(self.eos_token_id)
+        return torch.tensor(tokens, dtype=torch.long)
 
     def decode(self, tensor: torch.Tensor) -> torch.Tensor:
         return self.tokenizer.decode(tensor)
