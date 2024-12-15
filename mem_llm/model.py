@@ -538,9 +538,7 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
 
         # compute logits in full precision
         head_inputs = x[: -num_logits_to_keep:] if num_logits_to_keep is not None else x
-        head_inputs = head_inputs.float()
-
-        logits = self.lm_head(head_inputs)
+        logits = self.lm_head(head_inputs).float()
 
         if self.logit_soft_cap is not None:
             logits = self.logit_soft_cap * torch.tanh(logits / self.logit_soft_cap)

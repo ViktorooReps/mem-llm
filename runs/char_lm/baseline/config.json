@@ -39,7 +39,7 @@
     "vocab_size": 128
   },
   "log_per_steps": 50,
-  "disable_progress_bar": false,
+  "disable_progress_bar": true,
   "rewrite_metrics": true,
   "num_dataloader_workers": 4,
   "dataloader_prefetch_factor": 8,
