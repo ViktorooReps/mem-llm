@@ -33,11 +33,10 @@
     "embeds_residual": false,
     "do_compile": true
   },
-  "device": "cpu",
   "do_compile": true,
-  "tokenizer_type": "hf",
+  "tokenizer_type": "char",
   "tokenizer_config": {
-    "name": "HuggingFaceTB/SmolLM2-135M-Instruct"
+    "vocab_size": 128
   },
   "log_per_steps": 50,
   "disable_progress_bar": false,
