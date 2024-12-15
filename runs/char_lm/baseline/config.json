@@ -23,7 +23,7 @@
     "head_dims": 128,
     "mlp_hidden_dims_expansion": 2.0,
     "rotary_inv_freq_base": 1000000.0,
-    "n_layers": 24,
+    "n_layers": 4,
     "local_window": 512,
     "global_window": null,
     "mem_freq": 10000000000,
@@ -31,9 +31,9 @@
     "torch_dtype": "bfloat16",
     "unet_design": false,
     "embeds_residual": false,
-    "do_compile": true
+    "do_compile": false
   },
-  "do_compile": true,
+  "do_compile": false,
   "tokenizer_type": "char",
   "tokenizer_config": {
     "vocab_size": 128
