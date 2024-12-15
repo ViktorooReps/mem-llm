@@ -53,7 +53,7 @@ def serialize_dtype(dtype: str | torch.dtype) -> str:
 
 
 def norm(x):
-    return F.rms_norm(x, (x.size(-1),), eps=1e-5)
+    return F.rms_norm(x, (x.size(-1),), eps=1e-8)
 
 
 class CastedLinear(nn.Linear):
@@ -114,7 +114,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = self.hid_proj(x)
-        x = F.silu(x)
+        x = F.relu(x).square()
         x = self.out_proj(x)
         return x
 
@@ -266,6 +266,7 @@ class MemTransformerBlock(nn.Module):
                 enable_gqa=self.gqa_enabled
             ).transpose(1, 2).contiguous().view(batch_size, n, self.hidden_dims)
 
+        # residual connection over attention block and over MLP
         x = x + self.out_proj(attn)
         x = x + self.mlp(norm(x))
 
@@ -447,8 +448,13 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
         if len(tokens.shape) == 2 and not use_dense_attention:
             # flatten the batch by treating each example as a separate document
             batch_size, _ = tokens.shape
-            tokens = torch.concat([tokens, tokens.new_full((batch_size, 1), fill_value=self.eos_token)], dim=-1)
-            tokens = tokens.view(-1)
+
+            if batch_size > 1:
+                tokens = torch.concat([
+                    tokens,
+                    tokens.new_full((batch_size, 1), fill_value=self.eos_token)
+                ], dim=-1)
+                tokens = tokens.view(-1)
 
         seq_length = tokens.shape[-1]
         cache_size = 0 if past_cache is None else seq_length
@@ -491,7 +497,7 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
 
         embeds = None
         if self.embeds_residual:
-            embeds = torch.clone(x)
+            embeds = x
 
         # Store outputs for U-Net-style skip connections
         # If there is no need to store them, just ignore any actions with the list with Noop
@@ -529,12 +535,17 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
             x = x[:, :-1, :]
 
         x = norm(x)
-        logits = self.lm_head(x[: -num_logits_to_keep:] if num_logits_to_keep is not None else x)
+
+        # compute logits in full precision
+        head_inputs = x[: -num_logits_to_keep:] if num_logits_to_keep is not None else x
+        head_inputs = head_inputs.float()
+
+        logits = self.lm_head(head_inputs)
 
         if self.logit_soft_cap is not None:
             logits = self.logit_soft_cap * torch.tanh(logits / self.logit_soft_cap)
 
         return ModelOutput(
             logits=logits.squeeze(0) if batch_size is None else logits,
-            cache=None  # TODO
+            # cache=None  # TODO
         )
