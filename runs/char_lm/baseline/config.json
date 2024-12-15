@@ -1,5 +1,5 @@
 {
-  "training_steps": 1000,
+  "training_steps": 2000,
   "cooldown_steps": 0.2,
   "warmup_steps": 0.1,
   "eval_steps": 50,
@@ -14,8 +14,8 @@
   "max_grad_norm": 1.0,
   "model_type": "custom",
   "dataset_config": {
-    "dataset_name": "fineweb-edu",
-    "example_length": 64000
+    "dataset_name": "tiny-shakespeare",
+    "example_length": 16000
   },
   "model_config": {
     "n_q_heads": 8,

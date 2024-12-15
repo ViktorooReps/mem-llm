@@ -101,7 +101,7 @@ def save_memmap(file_path: str | Path, array: np.ndarray, source_dtype: np.dtype
 @dataclass
 class TSConfig(DatasetConfig):
     split: float = 0.95
-    dataset_name: str = 'tiny-shakespear'
+    dataset_name: str = 'tiny-shakespeare'
 
 
 def load_dataset_ts(config: TSConfig, tokenizer: Tokenizer) -> (GuaranteedLengthDataset, GuaranteedLengthDataset):
