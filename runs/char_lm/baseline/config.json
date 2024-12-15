@@ -28,7 +28,7 @@
     "global_window": null,
     "mem_freq": 10000000000,
     "precompute_mem": false,
-    "dtype": "bfloat16",
+    "torch_dtype": "bfloat16",
     "unet_design": false,
     "embeds_residual": false,
     "do_compile": true

@@ -393,7 +393,7 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
             'global_window': self.global_window,
             'mem_freq': self.mem_freq,
             'precompute_mem': self.precompute_mem,
-            'dtype': serialize_dtype(self.dtype),
+            'torch_dtype': serialize_dtype(self.dtype),
             'device': str(self.device),
             'unet_design': self.unet_design,
             'embeds_residual': self.embeds_residual,
