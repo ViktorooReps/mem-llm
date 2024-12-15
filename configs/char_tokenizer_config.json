@@ -1,5 +1,5 @@
 {
   "vocab_size": 128,
   "unk_token": 0,
-  "eos_token": 127
+  "eos_token_id": 127
 }
