@@ -22,7 +22,7 @@ torch._dynamo.config.cache_size_limit = 1000
 DO_COMPILE = True
 
 if DO_COMPILE:
-    flex_attention = torch.compile(flex_attention, fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
+    flex_attention = torch.compile(flex_attention, dynamic=False)
 
 _T = TypeVar('_T', bound=ConfigurableMixin)
 
@@ -72,7 +72,7 @@ class Rotary(torch.nn.Module):
         self.base = base
         self.device = device
         self.dtype = dtype
-        self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dims, 2, device=self.device).double() / self.dims))
+        self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dims, 2, device=self.device).float() / self.dims))
 
     def forward(
             self,
