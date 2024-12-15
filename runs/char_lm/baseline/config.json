@@ -31,9 +31,9 @@
     "torch_dtype": "bfloat16",
     "unet_design": false,
     "embeds_residual": false,
-    "do_compile": false
+    "do_compile": true
   },
-  "do_compile": false,
+  "do_compile": true,
   "tokenizer_type": "char",
   "tokenizer_config": {
     "vocab_size": 128

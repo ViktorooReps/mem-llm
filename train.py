@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import json
 import os.path
 import shutil
 import time
@@ -732,4 +733,7 @@ if __name__ == '__main__':
 
     cfg = TrainingConfig.load(cfg_path, run_name=args.run_name)
     ctx = prepare_context(cfg, pretrained_model_path=args.from_pretrained)
+
+    logger.info(f'Starting training from \n{json.dumps(cfg.to_config(), indent=4)}')
+
     train(ctx)

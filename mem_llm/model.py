@@ -19,10 +19,10 @@ from mem_llm.noop import Noop
 torch._dynamo.config.cache_size_limit = 1000
 
 
-DO_COMPILE = False
+DO_COMPILE = True
 
 if DO_COMPILE:
-    flex_attention = torch.compile(flex_attention, dynamic=False)
+    flex_attention = torch.compile(flex_attention, fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 _T = TypeVar('_T', bound=ConfigurableMixin)
 
