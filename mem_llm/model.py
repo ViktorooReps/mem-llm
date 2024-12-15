@@ -184,6 +184,8 @@ class MemTransformerBlock(nn.Module):
             mem_block_mask: BlockMask | None,
     ) -> torch.Tensor:
 
+        print('forward')
+
         batch_size, seq_length, _ = x.shape
 
         if embed_residual is not None:
