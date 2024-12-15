@@ -473,7 +473,8 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
                 local_window=self.local_window,
                 global_window=self.global_window,
                 separate_mem_and_main_update=self.precompute_mem,
-                do_compile=self.do_compile
+                do_compile=self.do_compile,
+                pad_memory=True
             )
             x_pos = full_positions.unsqueeze(0)
         else:

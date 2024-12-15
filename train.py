@@ -463,7 +463,8 @@ def prepare_context(config: TrainingConfig, *, pretrained_model_path: str | Path
         
         # check if the experiment has already been completed
         model_path = run_dir / MODEL_DIR
-        if model_path.exists() and model_path.is_dir() and len(list(model_path.iterdir())):
+        # FIXME: >1 is a hack, really we need to check that the weights are saved, not only tokenizer
+        if model_path.exists() and model_path.is_dir() and len(list(model_path.iterdir())) > 1:
             raise RuntimeError(
                 f'The experiment at {run_dir} has already been finished! See trained model at {model_path}'
             )
