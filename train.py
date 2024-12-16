@@ -447,7 +447,13 @@ def save_checkpoint(context: TrainingContext, *, remove_others: bool = False) ->
     return save_to_checkpoint_dir
 
 
-def prepare_context(config: TrainingConfig, *, pretrained_model_path: str | Path | None = None) -> TrainingContext:
+def prepare_context(
+        config: TrainingConfig,
+        *,
+        pretrained_model_path: str | Path | None = None,
+        force_rewrite: bool = False
+) -> TrainingContext:
+
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -455,7 +461,7 @@ def prepare_context(config: TrainingConfig, *, pretrained_model_path: str | Path
         raise NotADirectoryError(f'run_dir {run_dir} is not a directory')
 
     config_path = run_dir / CONFIG_FILE
-    if config_path.exists():
+    if config_path.exists() and not force_rewrite:
         # FIXME: this will not work for loading 2 different pretrained models
         old_config = TrainingConfig.load(config_path, run_name=config.run_name)
         if old_config != config:
@@ -719,6 +725,12 @@ if __name__ == '__main__':
         help='Point to saved checkpoint or a model on HF hub to use as base model'
     )
 
+    parser.add_argument(
+        '--force_rewrite',
+        action='store_true',
+        help='Force rewrite of the run directory'
+    )
+
     args = parser.parse_args()
     if len(args.cooldown_checkpoints):
         raise NotImplementedError()
@@ -732,7 +744,7 @@ if __name__ == '__main__':
         raise FileNotFoundError(f'Could not locate a config file at {cfg_path}')
 
     cfg = TrainingConfig.load(cfg_path, run_name=args.run_name)
-    ctx = prepare_context(cfg, pretrained_model_path=args.from_pretrained)
+    ctx = prepare_context(cfg, pretrained_model_path=args.from_pretrained, force_rewrite=args.force_rewrite)
 
     logger.info(f'Starting training from \n{json.dumps(cfg.to_config(), indent=4)}')
 

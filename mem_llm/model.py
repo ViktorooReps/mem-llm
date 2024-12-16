@@ -275,6 +275,273 @@ class MemTransformerBlock(nn.Module):
         return x
 
 
+class TestModel(Generator, ConfigurableMixin, WindowedMixin):
+    def __init__(
+            self,
+            vocab_size: int = 128,
+            n_q_heads: int = 8,
+            n_kv_heads: int = 4,
+            head_dims: int = 128,
+            mlp_hidden_dims_expansion: float = 2.0,
+            rotary_inv_freq_base: float = 500_000.0,
+            n_layers: int = 24,
+            local_window: int = 128,
+            global_window: int = 128,
+            mem_freq: int | None = 64,  # None for simple window attention
+            precompute_mem: bool = False,
+            logit_soft_cap: float | None = None,  # 30.0
+            attention_score_soft_cap: float | None = None,
+            torch_dtype: str | torch.dtype | None = torch.bfloat16,
+            device: str | torch.device | None = 'cuda' if torch.cuda.is_available() else 'cpu',
+            unet_design: bool = False,
+            embeds_residual: bool = False,
+            eos_token_id: int = 127,
+            do_compile: bool = True,
+    ):
+        super().__init__()
+        if mem_freq is None and precompute_mem:
+            logger.warning(
+                f'Passed mem_freq={mem_freq} and precompute_mem={precompute_mem}. '
+                f'Using simple window attention, so precompute_mem argument is ignored.'
+            )
+            precompute_mem = False
+
+        self.vocab_size = vocab_size
+        self.n_q_heads = n_q_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dims = head_dims
+        self.mlp_hidden_dims_expansion = mlp_hidden_dims_expansion
+        self.rotary_inv_freq_base = rotary_inv_freq_base
+        self.n_layers = n_layers
+        self.local_window = local_window
+        self.global_window = global_window
+        self.mem_freq = mem_freq
+        self.precompute_mem = precompute_mem
+        self.logit_soft_cap = logit_soft_cap
+        self.attention_score_soft_cap = attention_score_soft_cap
+        self.dtype = deserialize_dtype(torch_dtype)
+        self.device = torch.device(device)
+        self.unet_design = unet_design
+        self.embeds_residual = embeds_residual
+        self.eos_token = eos_token_id
+        self.do_compile = do_compile
+
+        self.hidden_dims = n_q_heads * head_dims
+
+        extras = {'device': self.device, 'dtype': self.dtype}
+
+        self.token_embedding = nn.Embedding(self.vocab_size, self.hidden_dims, **extras)
+        self.mem_embedding = nn.Parameter(torch.zeros(self.hidden_dims, **extras))
+
+        self.transformer_blocks = nn.ModuleList([
+            MemTransformerBlock(
+                n_q_heads=self.n_q_heads,
+                n_kv_heads=self.n_kv_heads,
+                head_dims=self.head_dims,
+                mlp_hidden_dims_expansion=self.mlp_hidden_dims_expansion,
+                rotary_inv_freq_base=self.rotary_inv_freq_base,
+                precompute_mem=self.precompute_mem,
+                **extras
+            )
+            for _ in range(self.n_layers)
+        ])
+
+        # in case of U-Net design, add skip connections from encoder to decoder
+        if self.unet_design:
+            self.num_encoder_layers = self.n_layers // 2
+            self.num_decoder_layers = self.n_layers - self.num_encoder_layers
+
+            self.unet_skip_weights = nn.Parameter(torch.ones(self.num_encoder_layers, **extras))
+        else:
+            self.num_encoder_layers = self.n_layers
+            self.num_decoder_layers = 0
+
+            self.unet_skip_weights = None
+
+        self.lm_head = CastedLinear(self.hidden_dims, self.vocab_size, **extras)
+        self.lm_head.weight.data.zero_()
+
+    def set_mem_freq(self, mem_freq: int):
+        self.mem_freq = mem_freq
+
+    def set_local_window(self, local_window: int):
+        self.local_window = local_window
+
+    def set_global_window(self, global_window: int):
+        self.global_window = global_window
+
+    def to_config(self):
+        return {
+            'vocab_size': self.vocab_size,
+            'n_q_heads': self.n_q_heads,
+            'n_kv_heads': self.n_kv_heads,
+            'head_dims': self.head_dims,
+            'mlp_hidden_dims_expansion': self.mlp_hidden_dims_expansion,
+            'rotary_inv_freq_base': self.rotary_inv_freq_base,
+            'n_layers': self.n_layers,
+            'local_window': self.local_window,
+            'global_window': self.global_window,
+            'mem_freq': self.mem_freq,
+            'precompute_mem': self.precompute_mem,
+            'torch_dtype': serialize_dtype(self.dtype),
+            'device': str(self.device),
+            'unet_design': self.unet_design,
+            'embeds_residual': self.embeds_residual,
+            'eos_token_id': self.eos_token,
+            'do_compile': self.do_compile,
+        }
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        assert path.is_dir()
+
+        config_path = path / 'config.json'
+        weights_path = path / 'weights.safetensors'
+
+        super().save(config_path)  # saves config
+        save_model(self, str(weights_path.absolute()))
+
+    @classmethod
+    def load(cls: Type[_T], path: str | Path, *, device: int | str | torch.device = 'cpu', **config_changes) -> _T:
+        path = Path(path)
+
+        config_path = path / 'config.json'
+        weights_path = path / 'weights.safetensors'
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        model = cls.from_config(config, device=device, **config_changes)
+        load_model(model, weights_path, strict=True, device=device)
+
+        return model
+
+    def forward(
+            self,
+            tokens: torch.Tensor,  # (L,) or (B, L)
+            past_cache: Cache | None = None,
+            *,
+            use_cache: bool = False,
+            num_logits_to_keep: int | None = None
+    ) -> ModelOutput:
+
+        # INPUTS PREP ==========================================================================
+
+        # TODO: for compatibility with HF this should be L - cache_size = 1
+        # we use dense attention when the inputs are of length 1
+        # this happens (for example) during generation where we process inputs one token at a time
+        use_dense_attention = (tokens.shape[-1] == 1)
+
+        batch_size = None
+        if len(tokens.shape) == 2 and not use_dense_attention:
+            # flatten the batch by treating each example as a separate document
+            batch_size, _ = tokens.shape
+
+            if batch_size > 1:
+                tokens = torch.concat([
+                    tokens,
+                    tokens.new_full((batch_size, 1), fill_value=self.eos_token)
+                ], dim=-1)
+                tokens = tokens.view(-1)
+
+        # seq_length = tokens.shape[-1]
+        # cache_size = 0 if past_cache is None else seq_length
+        #
+        # # FIXME: in-document masking will not work with cache!
+        # # FIXME: this method works with sparse attention on square inputs (#KV = #Q),
+        # #  which is not compatible for generation with cache: use dense implementation in this case
+        # if cache_size or use_cache:
+        #     raise NotImplementedError
+        #
+        # if not use_dense_attention:
+        #     block_mask, mem_block_mask, n_mem, full_positions = create_mem_block_masks(
+        #         tokens=tokens,
+        #         eos_token=self.eos_token,
+        #         mem_freq=self.mem_freq,
+        #         local_window=self.local_window,
+        #         global_window=self.global_window,
+        #         separate_mem_and_main_update=self.precompute_mem,
+        #         do_compile=self.do_compile,
+        #         pad_memory=True
+        #     )
+        #     x_pos = full_positions.unsqueeze(0)
+        # else:
+        #     block_mask = None
+        #     mem_block_mask = None
+        #     new_position = 0  # TODO: cache_end_position + 1
+        #     n_mem = int((new_position % self.mem_freq) == 0)
+        #     x_pos = tokens.new_tensor([[new_position] * (n_mem + 1)])  # TODO: determine from cache
+        #
+
+        if batch_size is None:
+            # inner modules work with batched data
+            tokens = tokens.unsqueeze(0)
+
+        # TRANSFORMER PASS =====================================================================
+
+        x = self.token_embedding(tokens)
+        # mem = self.mem_embedding.view(1, 1, -1).repeat(1, n_mem, 1)
+
+        # x = torch.concat([mem, x], dim=1)  # the first n_mem tokens are memory
+        x = norm(x)
+
+        # embeds = None
+        # if self.embeds_residual:
+        #     embeds = x
+        #
+        # # Store outputs for U-Net-style skip connections
+        # # If there is no need to store them, just ignore any actions with the list with Noop
+        # skip_connections = [] if self.unet_design else Noop()
+        #
+        # # Encoder pass - process only the first half of the blocks
+        # for i in range(self.num_encoder_layers):
+        #     x = self.transformer_blocks[i](
+        #         x, x_pos,
+        #         embed_residual=embeds,
+        #         n_mem=n_mem,
+        #         block_mask=block_mask,
+        #         mem_block_mask=mem_block_mask
+        #     )
+        #     skip_connections.append(x)
+        #
+        # # Decoder pass - process the remaining blocks with weighted skip connections
+        # for i in range(self.num_decoder_layers):
+        #     x = x + self.unet_skip_weights[i] * skip_connections.pop()
+        #     x = self.transformer_blocks[self.num_encoder_layers + i](
+        #         x, x_pos,
+        #         embed_residual=embeds,
+        #         n_mem=n_mem,
+        #         block_mask=block_mask,
+        #         mem_block_mask=mem_block_mask
+        #     )
+        #
+        # # drop memory for logits computation
+        # x = x[:, n_mem:]
+        #
+
+        if batch_size is not None and not use_dense_attention:
+            # return to original shape
+            x = x.view(batch_size, -1, self.hidden_dims)
+            # drop added eos token
+            x = x[:, :-1, :]
+
+        x = norm(x)
+
+        # compute logits in full precision
+        head_inputs = x[: -num_logits_to_keep:] if num_logits_to_keep is not None else x
+        logits = self.lm_head(head_inputs).float()
+
+        if self.logit_soft_cap is not None:
+            logits = self.logit_soft_cap * torch.tanh(logits / self.logit_soft_cap)
+
+        return ModelOutput(
+            logits=logits.squeeze(0) if batch_size is None else logits,
+            # cache=None  # TODO
+        )
+
+
 class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
     """
     Largely inspired by https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt2.py

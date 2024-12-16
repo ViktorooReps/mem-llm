@@ -25,7 +25,7 @@ class ConfigurableMixin(metaclass=abc.ABCMeta):
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         config = self.to_config()
         with open(path, 'w') as f:
