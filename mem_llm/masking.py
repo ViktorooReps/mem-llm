@@ -174,7 +174,7 @@ def create_mem_block_masks(
 
     if target_n_mem_padded is None:
         mem_pad = 128 - n_mem % 128
-        mem_pad += 512
+        mem_pad += 2048
         target_n_mem_padded = mem_pad + n_mem
     else:
         mem_pad = target_n_mem_padded - n_mem

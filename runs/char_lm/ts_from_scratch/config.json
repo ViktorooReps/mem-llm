@@ -1,10 +1,10 @@
 {
-    "training_steps": 100,
+    "training_steps": 3000,
     "cooldown_steps": 0.2,
     "warmup_steps": 0.1,
     "eval_steps": 10,
-    "eval_per_steps": 5,
-    "checkpoint_per_steps": 2000,
+    "eval_per_steps": 25,
+    "checkpoint_per_steps": 3000,
     "keep_only_last_checkpoint": true,
     "use_muon": false,
     "adamw_learning_rate": 0.01,

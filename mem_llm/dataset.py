@@ -73,7 +73,7 @@ class GuaranteedLengthDataset(torch.utils.data.Dataset):
         self.dataset_length = min(len(self.tokens), limit_dataset_length) if limit_dataset_length is not None else len(self.tokens)
 
     def __len__(self):
-        return min((self.dataset_length - self.example_length) // self.tile_size, 1)
+        return max((self.dataset_length - self.example_length) // self.tile_size, 1)
 
     def __getitem__(self, idx):
         if idx >= len(self):

@@ -22,11 +22,6 @@ from mem_llm.noop import Noop
 torch._dynamo.config.cache_size_limit = 1000
 
 
-DO_COMPILE = True
-
-if DO_COMPILE:
-    flex_attention = torch.compile(flex_attention, dynamic=False)
-
 _T = TypeVar('_T', bound=ConfigurableMixin)
 
 
@@ -639,7 +634,7 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
         # drop memory for logits computation
         x = x[:, n_mem:]
 
-        if batch_size is not None and not use_dense_attention:
+        if batch_size is not None and batch_size > 1 and not use_dense_attention:
             # return to original shape
             x = x.view(batch_size, -1, self.hidden_dims)
             # drop added eos token
@@ -647,7 +642,7 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
 
         x = norm(x)
 
-        head_inputs = x[: -num_logits_to_keep:] if num_logits_to_keep is not None else x
+        head_inputs = x[:, -num_logits_to_keep:] if num_logits_to_keep is not None else x
         logits = self.lm_head(head_inputs)
 
         if self.logit_soft_cap is not None:
