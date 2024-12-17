@@ -1,4 +1,5 @@
 import argparse
+from copy import deepcopy
 import dataclasses
 import json
 import os.path
@@ -12,6 +13,7 @@ from typing import TypeVar, Type
 import torch
 import random
 import numpy as np
+import wandb
 from muon import Muon
 from torch.optim import Optimizer, AdamW
 from torch.optim.lr_scheduler import LRScheduler, LambdaLR
@@ -23,7 +25,7 @@ from mem_llm.custom_logging import logger
 from mem_llm.custom_tqdm import abbreviate_number
 from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteDataLoaderWrapper
 from mem_llm.interface import ConfigurableMixin, ModelOutput
-from mem_llm.model import MemLLM
+from mem_llm.model import DTYPE2STR, STR2DTYPE, MemLLM
 from mem_llm import TOKENIZERS, MODELS
 from mem_llm.tokenizer import Tokenizer
 
@@ -70,6 +72,7 @@ class TrainingConfig(ConfigurableMixin):
     model_config: dict = field(default_factory=dict)
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     do_compile: bool = True
+    amp_precision: torch.dtype | str | None = None
 
     # tokenizer
     tokenizer_type: str = 'hf'
@@ -105,7 +108,9 @@ class TrainingConfig(ConfigurableMixin):
         return cls.load(os.path.join(RUNS_DIR, run_name), run_name=run_name)
 
     def to_config(self):
-        return dataclasses.asdict(self)
+        self_copy = deepcopy(self)
+        self_copy.amp_precision = DTYPE2STR.get(self_copy.amp_precision, self_copy.amp_precision)
+        return dataclasses.asdict(self_copy)
 
     def __post_init__(self):
         if self.run_name is None:
@@ -140,9 +145,14 @@ class TrainingConfig(ConfigurableMixin):
         assert self.eval_steps > 0
         assert self.training_steps >= self.warmup_steps + self.cooldown_steps
 
+        if self.amp_precision is not None:
+            self.amp_precision = STR2DTYPE[self.amp_precision]
+
 
 class MetricsLogger(ConfigurableMixin):
-    def __init__(self, log_file: str | Path, column_names: list[str], *, rewrite: bool = True):
+    def __init__(self, log_file: str | Path, column_names: list[str], run_name: str, *, rewrite: bool = True):
+        self.run_name = run_name
+
         self.log_file = Path(log_file)
         self.log_file.parent.mkdir(exist_ok=True, parents=True)
 
@@ -151,13 +161,13 @@ class MetricsLogger(ConfigurableMixin):
 
         self.column_names = list(column_names)
 
-        # Initialize the log file with column headers
         if not self.log_file.exists() or rewrite:
             with open(self.log_file, 'w') as f:
                 f.write(','.join(self.column_names) + '\n')
 
+        wandb.init(dir=self.log_file.parent, name=run_name)
+
     def log(self, metrics: dict):
-        # Ensure no new keys are introduced
         extra_keys = [key for key in metrics if key not in self.column_names]
         if extra_keys:
             logger.error(
@@ -167,14 +177,16 @@ class MetricsLogger(ConfigurableMixin):
         complete_metrics = {key: metrics.get(key, None) for key in self.column_names}
 
         with open(self.log_file, 'a') as f:
-            # Write the values in the same order as the column names
             row = [str(complete_metrics[key]) if complete_metrics[key] is not None else '' for key in self.column_names]
             f.write(','.join(row) + '\n')
+
+        wandb.log(metrics)
 
     def to_config(self):
         return {
             'log_file': str(self.log_file),
             'column_names': self.column_names,
+            'run_name': self.run_name
         }
 
 
@@ -275,7 +287,7 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         'step', 'seen_tokens', 'time_delta_s', 'run_name',
         'local_window', 'global_window', 'mem_freq',
         'lr_mult', 'train_loss', 'val_loss',
-    ], rewrite=config.rewrite_metrics)
+    ], run_name=config.run_name, rewrite=config.rewrite_metrics)
 
     tokenizer_class: Type[Tokenizer] = TOKENIZERS[config.tokenizer_type]
     if pretrained_model_path is None:
@@ -305,6 +317,7 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
 
     model_extras = {
         # synchronise the model with tokenizer
+        'device': config.device,
         'vocab_size': len(tokenizer),
         'eos_token_id': tokenizer.eos_token_id,
     }
@@ -345,10 +358,10 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
     if config.end_global_window_size is None:
         config.end_global_window_size = model_global_window
 
-    if config.start_mem_window_size is None:
-        config.start_mem_window_size = model_mem_freq
-    if config.end_mem_window_size is None:
-        config.end_mem_window_size = model_mem_freq
+    if config.start_mem_freq is None:
+        config.start_mem_freq = model_mem_freq
+    if config.end_mem_freq is None:
+        config.end_mem_freq = model_mem_freq
 
     if config.use_muon:
         # Find ≥2D parameters in the body of the network -- these will be optimized by Muon
@@ -461,31 +474,31 @@ def prepare_context(
         raise NotADirectoryError(f'run_dir {run_dir} is not a directory')
 
     config_path = run_dir / CONFIG_FILE
-    if config_path.exists() and not force_rewrite:
+    if config_path.exists():
         # FIXME: this will not work for loading 2 different pretrained models
         old_config = TrainingConfig.load(config_path, run_name=config.run_name)
-        if old_config != config:
+        if old_config != config and not force_rewrite:
             raise RuntimeError(f'Config at {config_path} does not match current config! '
                                f'Have you forgotten to change run_name?')
         
         # check if the experiment has already been completed
         model_path = run_dir / MODEL_DIR
         # FIXME: >1 is a hack, really we need to check that the weights are saved, not only tokenizer
-        if model_path.exists() and model_path.is_dir() and len(list(model_path.iterdir())) > 1:
+        if model_path.exists() and model_path.is_dir() and len(list(model_path.iterdir())) > 1 and not force_rewrite:
             raise RuntimeError(
                 f'The experiment at {run_dir} has already been finished! See trained model at {model_path}'
             )
 
         # try to load the last checkpoint
         checkpoints = list_checkpoints(config)
-        if len(checkpoints):
+        if len(checkpoints) and not force_rewrite:
             last_checkpoint = checkpoints[-1]
             logger.warning(f'Continuing {config.run_name} from the last checkpoint: {last_checkpoint}')
             config.rewrite_metrics = False  # continue the run, so keep old metrics
             return load_checkpoint(last_checkpoint)
         
         metrics_file = run_dir / METRICS_FILE
-        if metrics_file.exists():
+        if metrics_file.exists() and not force_rewrite:
             logger.critical(f'Rewriting experiment data at {run_dir}! You have 10 seconds to stop this')
             time.sleep(10.0)
             config.rewrite_metrics = True
@@ -533,6 +546,7 @@ def evaluate(context: TrainingContext):
         # to compute time delta correctly, should not impact the performance too much
         torch.cuda.synchronize()
 
+    loss = running_eval_loss_sum / config.eval_steps
     context.metrics_logger.log({
         'step': context.step,
         'run_name': config.run_name,
@@ -544,11 +558,14 @@ def evaluate(context: TrainingContext):
             warmup_steps=config.warmup_steps,
             cooldown_steps=config.cooldown_steps
         ),
-        'val_loss': running_eval_loss_sum / config.eval_steps,
+        'val_loss': loss,
         'local_window': context.model.local_window,
         'global_window': context.model.global_window,
         'mem_freq': context.model.mem_freq,
     })
+
+    if context.config.disable_progress_bar:
+        logger.info(f'[{context.step}] Validation loss: {loss}')
 
 
 def compute_warmup_value(
@@ -572,6 +589,8 @@ def train(context: TrainingContext):
     logger.info(f'Running training for model with {abbreviate_number(model_params)} parameters')
 
     config = context.config
+    amp_dtype = config.amp_precision
+    amp_enabled = (amp_dtype is not None)
 
     # this will make a first few steps extremely slow
     context.model = torch.compile(context.model, disable=not config.do_compile)
@@ -631,7 +650,8 @@ def train(context: TrainingContext):
         def closure():
             context.optimizer.zero_grad()
 
-            outputs: ModelOutput = context.model(example)  # noqa
+            with torch.autocast(device_type=config.device, dtype=amp_dtype, enabled=amp_enabled):
+                outputs: ModelOutput = context.model(example)  # noqa
 
             # compute loss in full precision
             loss = F.cross_entropy(outputs.logits.view(seq_length, -1).float(), target.view(seq_length))
@@ -639,6 +659,9 @@ def train(context: TrainingContext):
             loss.backward()
 
             max_grad_norm = context.config.max_grad_norm
+            if max_grad_norm is None:
+                return loss.item()
+            
             if isinstance(context.model, torch.distributed.fsdp.FullyShardedDataParallel):
                 torch.distributed.fsdp.FullyShardedDataParallel.clip_grad_norm_(context.model, max_grad_norm)
             else:
@@ -747,5 +770,7 @@ if __name__ == '__main__':
     ctx = prepare_context(cfg, pretrained_model_path=args.from_pretrained, force_rewrite=args.force_rewrite)
 
     logger.info(f'Starting training from \n{json.dumps(cfg.to_config(), indent=4)}')
+
+    torch.set_float32_matmul_precision('medium')
 
     train(ctx)

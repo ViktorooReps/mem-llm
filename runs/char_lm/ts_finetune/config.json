@@ -1,0 +1,42 @@
+{
+    "training_steps": 150,
+    "cooldown_steps": 0.3,
+    "warmup_steps": 0.3,
+    "eval_steps": 10,
+    "eval_per_steps": 5,
+    "checkpoint_per_steps": 2000,
+    "keep_only_last_checkpoint": true,
+    "use_muon": false,
+    "adamw_learning_rate": 5e-5,
+    "adamw_beta1": 0.9,
+    "adamw_beta2": 0.99,
+    "adamw_wd": 0.01,
+    "max_grad_norm": 1.0,
+    "model_type": "custom",
+    "dataset_config": {
+      "dataset_name": "tiny-shakespeare",
+      "example_length": 10000
+    },
+    "model_config": null,
+    "device": "cuda",
+    "amp_precision": null,
+    "do_compile": true,
+    "tokenizer_type": "char",
+    "tokenizer_config": {
+      "vocab_size": 128
+    },
+    "log_per_steps": 5,
+    "disable_progress_bar": true,
+    "rewrite_metrics": true,
+    "num_dataloader_workers": 4,
+    "dataloader_prefetch_factor": 8,
+    "start_local_window_size": null,
+    "end_local_window_size": null,
+    "local_window_warmup_steps": 0,
+    "start_global_window_size": null,
+    "end_global_window_size": null,
+    "global_window_warmup_steps": 0,
+    "start_mem_freq": null,
+    "end_mem_freq": null,
+    "mem_freq_warmup_steps": 0
+  }

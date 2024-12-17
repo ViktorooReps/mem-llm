@@ -1,5 +1,5 @@
 from mem_llm.hf_models.modeling_llama import LlamaForCausalLM
-from mem_llm.model import MemLLM, TestModel
+from mem_llm.model import MemLLM
 from mem_llm.tokenizer import CharTokenizer, TikTokenTokenizer, HfTokenizer
 
 TOKENIZERS = {
@@ -11,5 +11,4 @@ TOKENIZERS = {
 MODELS = {
     'hf_llama': LlamaForCausalLM,
     'custom': MemLLM,
-    'test': TestModel
 }

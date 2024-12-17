@@ -2,3 +2,11 @@
 /runs/*/checkpoints
 /runs/*/*/checkpoints
 /runs/*/model
+/runs/*/*/model
+/runs/*/wandb
+/runs/*/*/wandb
+/*/__pychache__/
+mem_llm/__pycache__/
+mem_llm/hf_models/__pycache__/
+.ipynb_checkpoints/
+mem_llm.egg-info/
