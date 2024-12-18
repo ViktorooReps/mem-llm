@@ -31,7 +31,7 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention, _score_
 from torch.nn.functional import scaled_dot_product_attention
 
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.cache_utils import Cache, DynamicCache, StaticCache, SlidingWindowCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs, _flash_attention_forward
@@ -63,9 +63,6 @@ from ..masking import create_mem_block_masks
 # MEM LLM changes ->
 # for some reason FlexAttention does not work without this
 torch._dynamo.config.cache_size_limit = 1000
-
-# see https://github.com/pytorch/pytorch/issues/142817
-flex_attention = torch.compile(flex_attention, fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 
 def _is_power_of_two(n: int) -> bool:
@@ -296,15 +293,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
-
-
-# MEM LLM changes ->
-def apply_rotary_individual(q_or_k, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_or_k_embed = (q_or_k * cos) + (rotate_half(q_or_k) * sin)
-    return q_or_k_embed
-# <- MEM LLM changes
 
 
 class LlamaMLP(nn.Module):
@@ -660,10 +648,59 @@ class LlamaSdpaAttention(LlamaAttention):
         return attn_output, None, past_key_value
 
 
+# MEM LLM changes ->
+class LlamaFlexAttention(LlamaAttention):
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor | BlockMask] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            cache_position: Optional[torch.LongTensor] = None,
+            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+            **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
+        assert position_embeddings is not None
+        assert isinstance(attention_mask, BlockMask)
+
+        bsz, q_len, _ = hidden_states.shape
+        cos, sin = position_embeddings
+
+        target_shape = (bsz, q_len, -1, self.head_dim)
+
+        k = self.k_proj(hidden_states).view(*target_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(*target_shape).transpose(1, 2)
+        q = self.q_proj(hidden_states).view(*target_shape).transpose(1, 2)
+
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        # TODO: add cache here
+
+        attn_output = _flex_attention(
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            block_mask=attention_mask,
+            enable_gqa=self.gqa_enabled
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(bsz, q_len, -1)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
+# <- MEM LLM changes
+
+
 LLAMA_ATTENTION_CLASSES = {
     "eager": LlamaAttention,
     "flash_attention_2": LlamaFlashAttention2,
     "sdpa": LlamaSdpaAttention,
+    "flex_attention": LlamaFlexAttention
 }
 
 
@@ -747,230 +784,6 @@ class LlamaDecoderLayer(nn.Module):
         return outputs
 
 
-# MEM LLM changes ->
-class MemAttentionKwargs(TypedDict, total=False):
-    """
-    Keyword arguments for Mem Attention with Compile.
-
-    Attributes:
-        n_mem (`int`)
-            Number of memory states in the input.
-        mem_block_mask (`BlockMask`, *optional*)
-            The BlockMask for a separate memory update. Should support input shape of (n_mem, n_mem + seq_len)
-        block_mask (`int`, *optional*):
-            The BlockMask for the main sequence update. Should support input shape of (seq_len, n_mem + seq_len)
-    """
-    n_mem: int
-    mem_block_mask: Optional[BlockMask]
-    block_mask: Optional[BlockMask]
-
-
-class LlamaMemDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, layer_idx: int):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.layer_idx = layer_idx
-
-        self.n_q_heads = config.num_attention_heads
-        self.n_kv_heads = config.num_key_value_heads
-        self.head_dims = config.head_dim
-
-        self.hidden_dims = self.head_dims * self.n_q_heads
-        self.kv_dims = self.head_dims * self.n_kv_heads
-        self.gqa_enabled = (self.n_q_heads != self.n_kv_heads)
-        self.precompute_mem = config.precompute_mem
-
-        # wrap in self_attn for checkpoint compatibility with HF Llamas
-        self.self_attn = nn.ModuleDict({
-            'q_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=config.attention_bias),
-            'k_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=config.attention_bias),
-            'v_proj': nn.Linear(self.hidden_dims, self.kv_dims, bias=config.attention_bias),
-            'o_proj': nn.Linear(self.hidden_dims, self.hidden_dims, bias=config.attention_bias),
-            # we need additional projections back to the current layer KV space
-            # otherwise, the key-values will be of the next layer space
-            'k_mem_proj': nn.Linear(
-                self.hidden_dims, self.kv_dims, bias=config.attention_bias
-            ) if self.precompute_mem else None,
-            'v_mem_proj': nn.Linear(
-                self.hidden_dims, self.kv_dims, bias=config.attention_bias
-            ) if self.precompute_mem else None,
-        })
-
-        self.mlp = LlamaMLP(config)
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
-            output_attentions: Optional[bool] = False,
-            use_cache: Optional[bool] = False,
-            cache_position: Optional[torch.LongTensor] = None,
-            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-            **kwargs: Unpack[MemAttentionKwargs],
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*):
-                Unused
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-            cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-                Indices depicting the position of the input sequence tokens in the sequence
-            position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
-                Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
-                with `head_dim` being the embedding dimension of each attention head.
-            kwargs (`dict`, *optional*):
-                Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
-                into the model
-        """
-        assert attention_mask is None
-        assert position_embeddings is not None  # removed BC, so always expect PE
-
-        # FIXME: cache is not implemented for now
-        assert past_key_value is None
-
-        batch_size, seq_length, hidden_dims = hidden_states.size()
-        n_mem = kwargs.get('n_mem', 0)
-        block_mask = kwargs.get('block_mask', None)
-        mem_block_mask = kwargs.get('mem_block_mask', None)
-
-        # in llama, residual is taken before normalization
-        residual = hidden_states
-
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
-        k = self.self_attn.k_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dims)
-        v = self.self_attn.v_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dims)
-
-        cos, sin = position_embeddings
-
-        k = apply_rotary_individual(k, cos, sin, unsqueeze_dim=2)
-
-        hidden_states_mem = None
-        if self.precompute_mem and n_mem > 0:
-            # prerun the block on the memory
-            hidden_states_mem = hidden_states[:, :n_mem]
-            residual_mem = residual[:, :n_mem]
-            cos_mem = cos[:, :n_mem]
-            sin_mem = sin[:, :n_mem]
-
-            hidden_states_mem = self._run_block(
-                hidden_states_mem, residual_mem,
-                cos_mem, sin_mem,
-                k, v,
-                block_mask=mem_block_mask
-            )
-
-            # update KV with precomputed mem
-            k_mem = self.self_attn.k_mem_proj(hidden_states_mem).view(
-                batch_size, n_mem, self.n_kv_heads, self.head_dims
-            )
-            v_mem = self.self_attn.v_mem_proj(hidden_states_mem).view(
-                batch_size, n_mem, self.n_kv_heads, self.head_dims
-            )
-
-            k_mem = apply_rotary_individual(k_mem, cos_mem, sin_mem, unsqueeze_dim=2)
-
-            k_main = k[:, n_mem:]
-            v_main = v[:, n_mem:]
-
-            k = torch.concat([k_mem, k_main], dim=1)
-            v = torch.concat([v_mem, v_main], dim=1)
-
-            # process the rest of the inputs normally
-            hidden_states = hidden_states[:, n_mem:]
-            residual = residual[:, n_mem:]
-            cos = cos[:, n_mem:]
-            sin = sin[:, n_mem:]
-
-        hidden_states = self._run_block(
-            hidden_states, residual,
-            cos, sin,
-            k, v,
-            block_mask=block_mask
-        )
-
-        if self.precompute_mem and n_mem > 0:
-            assert hidden_states_mem is not None
-            hidden_states = torch.concat([hidden_states_mem, hidden_states], dim=1)
-
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (None,)
-
-        if use_cache:
-            outputs += (None,)
-
-        return outputs
-
-    def _run_block(
-            self,
-            x: torch.Tensor,  # (B, Q, H)
-            residual: torch.Tensor,  # (B, Q, H)
-            cos: torch.Tensor,
-            sin: torch.Tensor,
-            k: torch.Tensor,  # (B, KV, kvh, h) - precomputed k (possibly cached)
-            v: torch.Tensor,  # (B, KV, kvh, h) - precomputed v (possibly cached)
-            block_mask: BlockMask | None
-    ) -> torch.Tensor:  # (B, Q, H)
-        """
-        Runs a transformer block on x wrt to precomputed KV. If block_mask is not None, runs a
-        sparse attention implementation (FlexAttention), otherwise SDPA will be used.
-
-        IMPORTANT: keys should already be with position information encoded!
-
-        NOTE: SDPA can only be used when Q=1
-        """
-        batch_size, n, _ = x.shape
-
-        q = self.self_attn.q_proj(x).view(batch_size, n, self.n_q_heads, self.head_dims)
-        q = apply_rotary_individual(q, cos, sin, unsqueeze_dim=2)
-
-        if block_mask is None:
-            # this option is used when inferencing with cache that eliminates useless states
-            assert n == 1
-
-            # run dense attention
-            attn = scaled_dot_product_attention(
-                q.transpose(1, 2).contiguous(),
-                k.transpose(1, 2).contiguous(),
-                v.transpose(1, 2).contiguous(),
-                is_causal=False,  # we force n == 1, and assume that causality is preserved by the user
-                enable_gqa=self.gqa_enabled
-            ).transpose(1, 2).contiguous().view(batch_size, n, self.hidden_dims)
-        else:
-            # run sparse attention
-            attn = _flex_attention(
-                q.transpose(1, 2).contiguous(),
-                k.transpose(1, 2).contiguous(),
-                v.transpose(1, 2).contiguous(),
-                block_mask=block_mask,
-                enable_gqa=self.gqa_enabled
-            ).transpose(1, 2).contiguous().view(batch_size, n, self.hidden_dims)
-
-        # residual connection over attention block and over MLP
-        x = residual + self.self_attn.o_proj(attn)
-        residual = x  # avoid normalization of the residual connection
-        x = residual + self.mlp(self.post_attention_layernorm(x))
-
-        return x
-
-
-# <- MEM LLM changes
-
-
 LLAMA_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
@@ -1000,7 +813,7 @@ class LlamaPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
-    _supports_flex_attn = True  # for mem
+    _supports_flex_attn = True
     _supports_cache_class = True
     _supports_quantized_cache = True
     _supports_static_cache = True
@@ -1015,6 +828,12 @@ class LlamaPreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+
+
+class MemCache(Cache):
+    def __init__(self):
+        super().__init__()
+        # TODO
 
 
 LLAMA_INPUTS_DOCSTRING = r"""
@@ -1118,21 +937,15 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
         self.local_window = config.local_window
         self.global_window = config.global_window
 
-        self.precompute_mem = config.precompute_mem
-        assert self.precompute_mem is not None
-
-        layer_class = LlamaDecoderLayer
         self.is_mem = False
         self.embed_mem = None
 
         if config._attn_implementation == 'flex_attention':  # is set with `attn_implementation` in config
-            layer_class = LlamaMemDecoderLayer
             self.is_mem = True
             self.embed_mem = nn.Parameter(torch.zeros(config.hidden_size))
 
-        if not self.is_mem and (self.mem_freq is not None or self.precompute_mem):
-            raise ValueError(f'Configuring mem_freq={self.mem_freq} and precompute_mem={self.precompute_mem} '
-                             f'with attn_implementation not set to `flex`!')
+        if not self.is_mem and self.mem_freq is not None:
+            raise ValueError(f'Configuring mem_freq={self.mem_freq} with attn_implementation not set to `flex`!')
         # <- MEM LLM changes
 
         self.padding_idx = config.pad_token_id
@@ -1140,7 +953,7 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [layer_class(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
@@ -1250,6 +1063,10 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
+        if use_cache and past_key_values is None and not self.training:
+            batch_size, seq_len, _ = inputs_embeds.shape
+            past_key_values = None  # TODO: instantiate cache here
+
         # kept for BC (non `Cache` `past_key_values` inputs)
         return_legacy_cache = False
         if use_cache and not isinstance(past_key_values, Cache):
@@ -1273,7 +1090,6 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
             position_ids = cache_position.unsqueeze(0)
 
         # MEM LLM changes ->
-        mem_kwargs: MemAttentionKwargs = {}
         if self.is_mem:
             # the FlexAttention is used, so we convert inputs to one large input separated by <eos>
             # flatten the batch by treating each example as a separate document
@@ -1285,19 +1101,18 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                 ], dim=-1)
                 input_ids = input_ids.view(1, -1)
 
-            block_mask, mem_block_mask, n_mem, position_ids = create_mem_block_masks(
+            block_mask, _, n_mem, position_ids = create_mem_block_masks(
                 tokens=input_ids,  # input_ids here should be B=1!!
                 eos_token=self.eos_token_id,
                 mem_freq=self.mem_freq,
                 local_window=self.local_window,
                 global_window=self.global_window,
-                separate_mem_and_main_update=self.precompute_mem,
+                separate_mem_and_main_update=False,
                 do_compile=True,
                 pad_memory=False
             )
             mem_kwargs = {
                 'block_mask': block_mask,
-                'mem_block_mask': mem_block_mask,
                 'n_mem': n_mem,
             }
 
@@ -1354,7 +1169,6 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     **flash_attn_kwargs,
-                    **mem_kwargs,
                 )
 
             hidden_states = layer_outputs[0]

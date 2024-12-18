@@ -179,7 +179,6 @@ class LlamaConfig(PretrainedConfig):
         # specific to mem
         local_window=None,  # int
         global_window=None,  # int
-        precompute_mem=None,  # bool
         mem_freq=None,  # int
         mem_init='zeros',  # 'zeros', 'normal' or 'bos'
         **kwargs,
@@ -196,7 +195,6 @@ class LlamaConfig(PretrainedConfig):
             local_window = max_position_embeddings
         self.local_window = local_window
         self.global_window = global_window
-        self.precompute_mem = precompute_mem
         self.mem_freq = mem_freq
         self.mem_init = mem_init
 
