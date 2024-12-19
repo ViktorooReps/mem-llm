@@ -21,6 +21,8 @@ from torch.utils.data import DataLoader
 from torch.nn import functional as F
 from tqdm import tqdm
 
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+
 from mem_llm.custom_logging import logger
 from mem_llm.custom_tqdm import abbreviate_number
 from mem_llm.dataset import DATASET_CONFIGS, load_dataset, InfiniteDataLoaderWrapper
@@ -28,6 +30,7 @@ from mem_llm.interface import ConfigurableMixin, ModelOutput
 from mem_llm.model import DTYPE2STR, STR2DTYPE, MemLLM
 from mem_llm import TOKENIZERS, MODELS
 from mem_llm.tokenizer import Tokenizer
+
 
 RUNS_DIR = 'runs'
 CPTS_DIR = 'checkpoints'
@@ -38,6 +41,24 @@ CONFIG_FILE = 'config.json'
 OPTIMIZER_FILE = 'optimizer.pt'
 SCHEDULER_FILE = 'scheduler.pt'
 TRAINING_STATE_FILE = 'training_state.pt'
+
+
+
+def get_parameter_names(model, forbidden_layer_types):
+    """
+    Returns the names of the model parameters that are not inside a forbidden layer.
+    """
+    result = []
+    for name, child in model.named_children():
+        result += [
+            f"{name}.{n}"
+            for n in get_parameter_names(child, forbidden_layer_types)
+            if not isinstance(child, tuple(forbidden_layer_types))
+        ]
+    # Add model specific parameters (defined with nn.Parameter) since they are not in any child.
+    result += list(model._parameters.keys())
+    return result
+
 
 
 @dataclass
@@ -287,13 +308,16 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         'step', 'seen_tokens', 'time_delta_s', 'run_name',
         'local_window', 'global_window', 'mem_freq',
         'lr_mult', 'train_loss', 'val_loss',
+        'train_perplexity', 'val_perplexity'
     ], run_name=config.run_name, rewrite=config.rewrite_metrics)
+
+    tokenizer_extras = config.tokenizer_config if config.tokenizer_config is not None else {}
 
     tokenizer_class: Type[Tokenizer] = TOKENIZERS[config.tokenizer_type]
     if pretrained_model_path is None:
         tokenizer = tokenizer_class.from_config(config.tokenizer_config)
     else:
-        tokenizer = tokenizer_class.load(pretrained_model_path)
+        tokenizer = tokenizer_class.load(pretrained_model_path, **tokenizer_extras)
 
     dataset_name = config.dataset_config['dataset_name']
     dataset_config = DATASET_CONFIGS[dataset_name](**config.dataset_config)
@@ -320,6 +344,7 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         'device': config.device,
         'vocab_size': len(tokenizer),
         'eos_token_id': tokenizer.eos_token_id,
+        **(config.model_config if config.model_config is not None else dict())
     }
 
     model_class = MODELS[config.model_type]
@@ -382,12 +407,27 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
             adamw_wd=config.adamw_wd,
         )
     else:
+        decay_parameters = get_parameter_names(model, ALL_LAYERNORM_LAYERS)
+        decay_parameters = [name for name in decay_parameters if "bias" not in name]
+
+        optimizer_grouped_parameters = [
+            {
+                "params": [
+                    p for n, p in model.named_parameters() if (n in decay_parameters and p.requires_grad)
+                ],
+                "weight_decay": config.adamw_wd,
+            },
+            {
+                "params": [
+                    p for n, p in model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+                ],
+                "weight_decay": 0.0,
+            },
+        ]
         optimizer = AdamW(
-            params=model.parameters(),
+            params=optimizer_grouped_parameters,
             lr=config.adamw_learning_rate,
             betas=(config.adamw_beta1, config.adamw_beta2),
-            weight_decay=config.adamw_wd,
-            eps=1e-8,
             fused=True
         )
 
@@ -559,6 +599,7 @@ def evaluate(context: TrainingContext):
             cooldown_steps=config.cooldown_steps
         ),
         'val_loss': loss,
+        'val_perplexity': torch.exp(torch.tensor(loss)).item(),
         'local_window': context.model.local_window,
         'global_window': context.model.global_window,
         'mem_freq': context.model.mem_freq,
@@ -703,6 +744,7 @@ def train(context: TrainingContext):
                     cooldown_steps=config.cooldown_steps
                 ),
                 'train_loss': running_train_loss,
+                'train_perplexity': torch.exp(torch.tensor(running_train_loss)).item(),
                 'local_window': context.model.local_window,
                 'global_window': context.model.global_window,
                 'mem_freq': context.model.mem_freq,

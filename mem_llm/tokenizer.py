@@ -161,7 +161,7 @@ class HfTokenizer(Tokenizer):
         if not (real_size % 128 == 0):
             extra_pad = 128 - real_size % 128
 
-        self.size_padded = extra_pad
+        self.size_padded = real_size + extra_pad
 
     @classmethod
     def load(cls: Type[_T], path: str | Path, **extra_kwargs) -> _T:
@@ -172,7 +172,7 @@ class HfTokenizer(Tokenizer):
 
     @property
     def size(self) -> int:
-        return self.size_padded
+        return self.tokenizer.vocab_size
 
     @property
     def eos_token_id(self) -> int:

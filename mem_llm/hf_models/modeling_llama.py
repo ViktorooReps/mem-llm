@@ -21,9 +21,8 @@ import math
 import shutil
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Tuple, Union, TypedDict, Any, Dict
+from typing import List, Optional, Tuple, Union, Any, Dict
 
-import safetensors.torch
 import torch
 import torch.utils.checkpoint
 from torch import nn, Tensor
@@ -31,7 +30,7 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention, _score_
 from torch.nn.functional import scaled_dot_product_attention
 
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache, StaticCache, SlidingWindowCache
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs, _flash_attention_forward
@@ -60,6 +59,11 @@ from ..interface import ConfigurableMixin, WindowedMixin
 from ..masking import create_mem_block_masks
 
 
+DO_COMPILE = False
+if DO_COMPILE:
+    flex_attention = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+
+
 # MEM LLM changes ->
 # for some reason FlexAttention does not work without this
 torch._dynamo.config.cache_size_limit = 1000
@@ -81,7 +85,7 @@ def _next_power_of_two(n: int) -> int:
 
 # TODO: remove this once https://github.com/pytorch/pytorch/issues/143117 is resolved
 # compilation args taken from https://github.com/pytorch/pytorch/issues/142817
-@torch.compile(fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
+#@torch.compile(fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs")
 def _flex_attention(
     query: Tensor,  # (B, Hq, L, E)
     key: Tensor,    # (B, Hkv, S, E)
@@ -131,7 +135,7 @@ def _flex_attention(
         attn_out = attn_out.reshape(batch_size, n_q_heads, q_len, head_dims)
 
         return attn_out if not return_lse else (attn_out, result[1])
-
+    
     # if no padding is needed, just run flex_attention directly
     return flex_attention(
         query, key, value,
@@ -292,7 +296,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+    return q_embed.to(q.dtype), k_embed.to(k.dtype)
 
 
 class LlamaMLP(nn.Module):
@@ -650,6 +654,11 @@ class LlamaSdpaAttention(LlamaAttention):
 
 # MEM LLM changes ->
 class LlamaFlexAttention(LlamaAttention):
+    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
+        super().__init__(config=config, layer_idx=layer_idx)
+
+        self.gqa_enabled = (config.num_key_value_heads != config.num_attention_heads)
+
     def forward(
             self,
             hidden_states: torch.Tensor,
@@ -679,7 +688,7 @@ class LlamaFlexAttention(LlamaAttention):
 
         # TODO: add cache here
 
-        attn_output = _flex_attention(
+        attn_output = flex_attention(
             q.contiguous(),
             k.contiguous(),
             v.contiguous(),
@@ -945,7 +954,7 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
             self.embed_mem = nn.Parameter(torch.zeros(config.hidden_size))
 
         if not self.is_mem and self.mem_freq is not None:
-            raise ValueError(f'Configuring mem_freq={self.mem_freq} with attn_implementation not set to `flex`!')
+            raise ValueError(f'Configuring mem_freq={self.mem_freq} with attn_implementation not set to `flex_attention`!')
         # <- MEM LLM changes
 
         self.padding_idx = config.pad_token_id
@@ -1058,6 +1067,7 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 
         if batch_size > 1:
             raise NotImplementedError()
+ 
         # <- MEM LLM changes
 
         if inputs_embeds is None:
@@ -1108,19 +1118,17 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                 local_window=self.local_window,
                 global_window=self.global_window,
                 separate_mem_and_main_update=False,
-                do_compile=True,
+                do_compile=False,
                 pad_memory=False
             )
-            mem_kwargs = {
-                'block_mask': block_mask,
-                'n_mem': n_mem,
-            }
+
+            print(position_ids)
 
             mem_embeds = self.embed_mem.view(1, 1, -1).repeat(1, n_mem, 1)
             inputs_embeds = torch.concat([mem_embeds, inputs_embeds], dim=1)
 
             # masking is implemented in block_mask
-            causal_mask = None
+            causal_mask = block_mask
         else:
             causal_mask = self._update_causal_mask(
                 attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
@@ -1139,18 +1147,18 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
         next_decoder_cache = None
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+
             if output_hidden_states:
                 # MEM LLM changes ->
                 # remove added memory (if any was added)
-                all_hidden_states += (hidden_states[:, :-seq_length],)
+                all_hidden_states += (hidden_states[:, -seq_length:],)
                 # <- MEM LLM changes
 
             if self.gradient_checkpointing and self.training:
-                # TODO: this may be broken with mem
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    causal_mask,
+                    causal_mask,  # TODO: this may be broken with mem
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -1181,7 +1189,7 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 
         # MEM LLM changes ->
         # remove added memory (if any was added)
-        hidden_states = hidden_states[:, :-seq_length]
+        hidden_states = hidden_states[:, -seq_length:]
         # <- MEM LLM changes
 
         hidden_states = self.norm(hidden_states)
@@ -1332,7 +1340,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin, ConfigurableMixin,
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(
+            self, 
+            config: LlamaConfig, 
+            *, 
+            device: str | torch.device = 'cpu'   # FIXME: ignored
+        ):
+
         super().__init__(config)
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
@@ -1360,6 +1374,23 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin, ConfigurableMixin,
         return self.model
 
     # MEM LLM changes ->
+
+    @property
+    def local_window(self) -> int:
+        return self.model.local_window
+    
+    @property
+    def global_window(self) -> int:
+        return self.model.global_window
+    
+    @property
+    def mem_freq(self) -> int:
+        return self.model.mem_freq
+
+    @classmethod
+    def load(cls, path: str | Path, **extra_kwargs) -> 'KwargsForCausalLM':
+        path = str(path)
+        return cls.from_pretrained(path, **extra_kwargs)
 
     def save(self, path: str | Path) -> None:
         self.save_pretrained(path)
