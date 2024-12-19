@@ -576,13 +576,12 @@ class MemLLM(Generator, ConfigurableMixin, WindowedMixin):
             raise NotImplementedError
 
         if not use_dense_attention:
-            block_mask, _, n_mem, full_positions = create_mem_block_masks(
+            block_mask, n_mem, full_positions = create_mem_block_masks(
                 tokens=tokens,
                 eos_token=self.eos_token,
                 mem_freq=self.mem_freq,
                 local_window=self.local_window,
                 global_window=self.global_window,
-                separate_mem_and_main_update=False,
                 do_compile=self.do_compile,
                 pad_memory=True
             )

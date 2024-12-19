@@ -1111,18 +1111,15 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
                 ], dim=-1)
                 input_ids = input_ids.view(1, -1)
 
-            block_mask, _, n_mem, position_ids = create_mem_block_masks(
+            block_mask, n_mem, position_ids = create_mem_block_masks(
                 tokens=input_ids,  # input_ids here should be B=1!!
                 eos_token=self.eos_token_id,
                 mem_freq=self.mem_freq,
                 local_window=self.local_window,
                 global_window=self.global_window,
-                separate_mem_and_main_update=False,
                 do_compile=False,
                 pad_memory=False
             )
-
-            print(position_ids)
 
             mem_embeds = self.embed_mem.view(1, 1, -1).repeat(1, n_mem, 1)
             inputs_embeds = torch.concat([mem_embeds, inputs_embeds], dim=1)

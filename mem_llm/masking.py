@@ -96,10 +96,9 @@ def create_mem_block_masks(
         mem_freq: int | None = None,
         local_window: int | None = None,
         global_window: int | None = None,
-        separate_mem_and_main_update: bool = False,
         do_compile: bool = True,
         pad_memory: bool = False,
-) -> (BlockMask, BlockMask | None, int, torch.Tensor):
+) -> (BlockMask, int, torch.Tensor):
 
     with_batch_dim = False
     if len(tokens.shape) > 1:
@@ -108,10 +107,6 @@ def create_mem_block_masks(
         tokens = tokens.squeeze(0)
 
     seq_length = len(tokens)
-
-    if mem_freq is None and separate_mem_and_main_update:
-        logger.warning('Possible configuration error: separate_mem_and_main_update=True and mem_freq is not set')
-        separate_mem_and_main_update = False
 
     if local_window is None:
         local_window = seq_length
@@ -156,10 +151,11 @@ def create_mem_block_masks(
 
     def base_document_mask(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor):
         # attend only within the same document and do not attend to and from <eos> tokens
-        return (full_doc_ids[q_idx] == full_doc_ids[kv_idx]) & ~full_eos_mask[q_idx] & ~full_eos_mask[kv_idx]
+        # allow <eos> only attend to itself
+        return ((full_doc_ids[q_idx] == full_doc_ids[kv_idx])
+                & ((full_eos_mask[q_idx] & full_eos_mask[kv_idx]) | (~full_eos_mask[q_idx] & ~full_eos_mask[kv_idx])))
 
     n_updated = seq_length + n_mem + mem_pad
-    mem_block_mask = None
 
     block_mask = create_block_mask(
         and_masks(base_document_mask, create_mem_window_mask_mod(
@@ -178,4 +174,4 @@ def create_mem_block_masks(
     )
 
     full_positions = full_positions.unsqueeze(0) if with_batch_dim else full_positions
-    return block_mask, mem_block_mask, n_mem + mem_pad, full_positions
+    return block_mask, n_mem + mem_pad, full_positions
