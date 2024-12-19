@@ -59,7 +59,7 @@ from ..interface import ConfigurableMixin, WindowedMixin
 from ..masking import create_mem_block_masks
 
 
-DO_COMPILE = False
+DO_COMPILE = True
 if DO_COMPILE:
     flex_attention = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
@@ -973,19 +973,18 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.mem_initialized = False
 
-        # MEM LLM changes ->
+    def reinit_mem(self):
         if self.is_mem:
-            # init mem embedding separately
-            if config.mem_init == 'bos':
-                self.embed_mem.data.copy_(self.embed_tokens.weight[config.bos_token_id])
-            elif config.mem_init == 'normal':
-                self.embed_mem.data.normal_(mean=0.0, std=config.initializer_range)
-            elif config.mem_init == 'zeros':
+            if self.config.mem_init == 'bos':
+                self.embed_mem.data.copy_(self.embed_tokens.weight[self.config.bos_token_id])
+            elif self.config.mem_init == 'normal':
+                self.embed_mem.data.normal_(mean=0.0, std=self.config.initializer_range)
+            elif self.config.mem_init == 'zeros':
                 self.embed_mem.data.zero_()
             else:
-                raise ValueError(f'Unknown mem_init {config.mem_init}, choose from `normal`, `bos`, `zeros`!')
-        # <- MEM LLM changes
+                raise ValueError(f'Unknown mem_init {self.config.mem_init}, choose from `normal`, `bos`, `zeros`!')
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1039,6 +1038,11 @@ class LlamaModel(LlamaPreTrainedModel, ConfigurableMixin, WindowedMixin):
         cache_position: Optional[torch.LongTensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
+        
+        if self.config.mem_init is not None:
+            self.reinit_mem()
+            self.config.mem_init = None
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states

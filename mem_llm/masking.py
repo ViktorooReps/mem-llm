@@ -5,7 +5,7 @@ from torch.nn.attention.flex_attention import create_block_mask, _mask_mod_signa
 
 from mem_llm.custom_logging import logger
 
-DO_COMPILE = False
+DO_COMPILE = True
 
 if DO_COMPILE:
     create_block_mask = torch.compile(create_block_mask, dynamic=False, mode="max-autotune-no-cudagraphs")
@@ -155,8 +155,6 @@ def create_mem_block_masks(
         return ((full_doc_ids[q_idx] == full_doc_ids[kv_idx])
                 & ((full_eos_mask[q_idx] & full_eos_mask[kv_idx]) | (~full_eos_mask[q_idx] & ~full_eos_mask[kv_idx])))
 
-    n_updated = seq_length + n_mem + mem_pad
-
     block_mask = create_block_mask(
         and_masks(base_document_mask, create_mem_window_mask_mod(
             pos=full_positions,
@@ -167,7 +165,7 @@ def create_mem_block_masks(
         )),
         B=None,
         H=None,
-        Q_LEN=n_updated,
+        Q_LEN=seq_length + n_mem + mem_pad,
         KV_LEN=seq_length + n_mem + mem_pad,
         device=str(tokens.device),
         _compile=do_compile
