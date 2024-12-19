@@ -5,7 +5,7 @@ from torch.nn.attention.flex_attention import create_block_mask, _mask_mod_signa
 
 from mem_llm.custom_logging import logger
 
-DO_COMPILE = True
+DO_COMPILE = False
 
 if DO_COMPILE:
     create_block_mask = torch.compile(create_block_mask, dynamic=False, mode="max-autotune-no-cudagraphs")

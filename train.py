@@ -197,11 +197,21 @@ class MetricsLogger(ConfigurableMixin):
 
         complete_metrics = {key: metrics.get(key, None) for key in self.column_names}
 
+        def convert(v):
+            if isinstance(v, list) or isinstance(v, tuple):
+                v = np.mean(v)
+            return str(v)
+
         with open(self.log_file, 'a') as f:
-            row = [str(complete_metrics[key]) if complete_metrics[key] is not None else '' for key in self.column_names]
+            row = [convert(complete_metrics[key]) if complete_metrics[key] is not None else '' for key in self.column_names]
             f.write(','.join(row) + '\n')
 
-        wandb.log(metrics)
+        def convert(v):
+            if isinstance(v, list) or isinstance(v, tuple):
+                v = wandb.Histogram(v)
+            return v
+
+        wandb.log({name: convert(metric) for name, metric in metrics.items()})
 
     def to_config(self):
         return {
@@ -308,7 +318,7 @@ def new_context(config: TrainingConfig, *, pretrained_model_path: str | Path | N
         'step', 'seen_tokens', 'time_delta_s', 'run_name',
         'local_window', 'global_window', 'mem_freq',
         'lr_mult', 'train_loss', 'val_loss',
-        'train_perplexity', 'val_perplexity'
+        'train_perplexity', 'val_perplexity', 'grad_norm'
     ], run_name=config.run_name, rewrite=config.rewrite_metrics)
 
     tokenizer_extras = config.tokenizer_config if config.tokenizer_config is not None else {}
@@ -668,6 +678,7 @@ def train(context: TrainingContext):
     last_log_time = time.time()
 
     bar = tqdm(desc='Training', total=config.training_steps, disable=config.disable_progress_bar, leave=True)
+    grad_norms = []
 
     for step_idx in range(last_step, config.training_steps):
         context.step = step_idx
@@ -704,9 +715,11 @@ def train(context: TrainingContext):
                 return loss.item()
             
             if isinstance(context.model, torch.distributed.fsdp.FullyShardedDataParallel):
-                torch.distributed.fsdp.FullyShardedDataParallel.clip_grad_norm_(context.model, max_grad_norm)
+                grad_norm = torch.distributed.fsdp.FullyShardedDataParallel.clip_grad_norm_(context.model, max_grad_norm).item()
             else:
-                torch.nn.utils.clip_grad_norm_(context.model.parameters(), max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(context.model.parameters(), max_grad_norm).item()
+
+            grad_norms.append(grad_norm)
 
             return loss.item()
 
@@ -721,7 +734,8 @@ def train(context: TrainingContext):
         if step_idx > 0 and step_idx % config.eval_per_steps == 0:
             evaluate(context)
 
-        if step_idx > 0 and step_idx % config.log_per_steps == 0:
+        # log on first step as well
+        if step_idx % config.log_per_steps == 0:
             running_train_loss = running_train_loss_sum / steps_without_log
 
             running_train_loss_sum = 0.0
@@ -748,7 +762,10 @@ def train(context: TrainingContext):
                 'local_window': context.model.local_window,
                 'global_window': context.model.global_window,
                 'mem_freq': context.model.mem_freq,
+                'grad_norm': grad_norms[0] if len(grad_norms) == 1 else grad_norms
             })
+
+            grad_norms = []
 
             last_log_time = time.time()
 
